@@ -1,0 +1,1 @@
+"""EGX Swing Scout package."""
