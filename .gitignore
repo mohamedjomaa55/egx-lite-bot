@@ -7,3 +7,6 @@ logs/
 reports/
 .venv/
 .venv312/
+backup/
+.pytest_cache/
+.mypy_cache/
