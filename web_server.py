@@ -32,22 +32,20 @@ def health():
     return {"status": "ok", "service": "egx-swing-scout"}
 
 
-def run_bot():
-    """Run the Telegram bot in a background thread."""
-    try:
-        from bot import main as bot_main
-        bot_main()
-    except Exception as e:
-        logger.error(f"Bot crashed: {e}")
+def run_flask():
+    """Run Flask in a background thread to keep Render service alive."""
+    port = int(os.getenv("PORT", 5000))
+    logger.info(f"Starting web server on port {port}")
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 
 if __name__ == "__main__":
-    # Start bot in background thread
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    logger.info("Bot started in background thread")
+    # Start Flask in background thread (keeps Render alive)
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("Flask server started in background")
 
-    # Run Flask server (required by Render to keep service alive)
-    port = int(os.getenv("PORT", 5000))
-    logger.info(f"Starting web server on port {port}")
-    app.run(host="0.0.0.0", port=port)
+    # Run Telegram bot in main thread (requires asyncio event loop)
+    logger.info("Starting Telegram bot in main thread...")
+    from bot import main as bot_main
+    bot_main()
