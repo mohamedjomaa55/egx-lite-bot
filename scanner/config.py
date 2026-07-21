@@ -138,6 +138,32 @@ RADAR_PERCENTILE_EXTREME = float(os.getenv("RADAR_PERCENTILE_EXTREME", "95"))
 RADAR_PERCENTILE_HIGH = float(os.getenv("RADAR_PERCENTILE_HIGH", "90"))
 RADAR_PERCENTILE_ELEVATED = float(os.getenv("RADAR_PERCENTILE_ELEVATED", "75"))
 
+# ══════════════════════════════════════════════════════════════════════
+# EGX SESSION CALENDAR
+# ══════════════════════════════════════════════════════════════════════
+
+# EGX trading days: Sunday(6), Monday(0), Tuesday(1), Wednesday(2), Thursday(3)
+EGX_TRADING_DAYS = {0, 1, 2, 3, 6}
+
+# EGX session times (Cairo time)
+EGX_OPEN_HOUR = 9
+EGX_OPEN_MINUTE = 30
+EGX_CLOSE_HOUR = 14
+EGX_CLOSE_MINUTE = 15
+
+# Safety buffer after close before declaring session complete
+EGX_SAFETY_BUFFER_MINUTES = 30
+
+# Freshness status constants
+FRESHNESS_CURRENT = "CURRENT"
+FRESHNESS_PROVIDER_DELAYED = "PROVIDER_DELAYED"
+FRESHNESS_MARKET_OPEN = "MARKET_OPEN"
+FRESHNESS_NON_TRADING_DAY = "NON_TRADING_DAY"
+FRESHNESS_DATA_UNAVAILABLE = "DATA_UNAVAILABLE"
+
+# Maximum acceptable provider delay (in days) before warning
+FRESHNESS_MAX_ACCEPTABLE_DELAY_DAYS = 1
+
 # ── Data Mode Constants ──────────────────────────────────────────────
 DATA_MODE_DAILY = "DAILY_COMPLETED_SESSION"
 DATA_MODE_LIVE = "LIVE_SESSION"

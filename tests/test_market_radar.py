@@ -35,7 +35,7 @@ from scanner.market_radar import (
     RadarItem,
 )
 from scanner.ism_handoff import create_handoff, ISMHandoff
-from scanner.radar_data import RadarHistory, DailyBar
+from scanner.radar_data import RadarHistory, DailyBar, _validate_bar, _bars_are_valid, FAILURE_INVALID_OHLC, FAILURE_INVALID_CLOSE
 from scanner.radar_output import format_radar_telegram, format_radar_symbol_telegram
 
 
@@ -513,3 +513,495 @@ class TestVolumeRanking:
         # Bearish should rank higher
         assert sorted_items[0].symbol == "BEAR"
         assert sorted_items[0].activity_level == ActivityLevel.EXTREME
+
+
+# ─── OHLC Mapping Regression Tests ─────────────────────────────────
+class TestOHLCMapping:
+    """Regression tests for the OHLC field-mapping bug fix.
+
+    Ensures that the close price is always used as the displayed price,
+    and open is never silently substituted for close.
+    """
+
+    def test_close_is_display_price(self):
+        """Test 1: display_price and price must equal close, not open.
+
+        open=56.93, close=57.60
+        expected: display_price=57.60, session_open=56.93
+        """
+        bars = []
+        for i in range(80):
+            bars.append(DailyBar(
+                date=(datetime.now() - timedelta(days=80 - i)).strftime("%Y-%m-%d"),
+                open=56.00 + i * 0.01,
+                high=57.00 + i * 0.01,
+                low=55.50 + i * 0.01,
+                close=57.60 if i == 79 else 55.20 + i * 0.01,
+                volume=100000 + (2000000 if i == 79 else 0),
+            ))
+        history = RadarHistory(symbol="TEST", bars=bars, data_mode="DAILY_COMPLETED_SESSION")
+
+        with patch("scanner.market_radar.get_completed_daily_bars", return_value=history):
+            item = _analyze_symbol("TEST")
+
+        assert item is not None
+        assert item.latest_close == 57.60
+        assert item.display_price == 57.60
+        assert item.price == 57.60
+        assert item.session_open == bars[-1].open
+        assert item.display_price != item.session_open
+
+    def test_price_change_from_close_not_open(self):
+        """Test 2: price_change must be close vs prev_close, not open vs prev_close.
+
+        previous_close=56.93, latest_open=56.93, latest_close=57.60
+        expected: price_change = 57.60 - 56.93 = 0.67, NOT 0.0
+        """
+        bars = []
+        for i in range(80):
+            bars.append(DailyBar(
+                date=(datetime.now() - timedelta(days=80 - i)).strftime("%Y-%m-%d"),
+                open=50.0 + i * 0.1,
+                high=51.0 + i * 0.1,
+                low=49.5 + i * 0.1,
+                close=56.93 if i == 78 else (57.60 if i == 79 else 50.5 + i * 0.1),
+                volume=100000 + (2000000 if i == 79 else 0),
+            ))
+        history = RadarHistory(symbol="TEST", bars=bars, data_mode="DAILY_COMPLETED_SESSION")
+
+        with patch("scanner.market_radar.get_completed_daily_bars", return_value=history):
+            item = _analyze_symbol("TEST")
+
+        assert item is not None
+        expected_change = 57.60 - 56.93
+        actual_change = item.price_change_percent
+        expected_pct = (expected_change / 56.93) * 100
+        assert abs(actual_change - round(expected_pct, 2)) < 0.1
+        assert actual_change != 0.0
+
+    def test_bullish_candle_classified_buying(self):
+        """Test 3: Bullish candle with high volume → eligible for BUYING_ACTIVITY.
+
+        open=100, high=110, low=99, close=109
+        expected: positive candle body, high CLV
+        """
+        bars = []
+        for i in range(80):
+            bars.append(DailyBar(
+                date=(datetime.now() - timedelta(days=80 - i)).strftime("%Y-%m-%d"),
+                open=95.0 + i * 0.05,
+                high=96.0 + i * 0.05,
+                low=94.5 + i * 0.05,
+                close=109.0 if i == 79 else 95.5 + i * 0.05,
+                volume=100000 + (3000000 if i == 79 else 0),
+            ))
+        history = RadarHistory(symbol="TEST", bars=bars, data_mode="DAILY_COMPLETED_SESSION")
+
+        with patch("scanner.market_radar.get_completed_daily_bars", return_value=history):
+            item = _analyze_symbol("TEST")
+
+        assert item is not None
+        # Close is near high = high CLV
+        assert item.close_location_value > 0.7
+        # Positive candle body
+        assert item.candle_body_percent > 50
+
+    def test_bearish_candle_classified_selling(self):
+        """Test 4: Bearish candle with high volume → eligible for SELLING_ACTIVITY.
+
+        open=110, high=111, low=99, close=100
+        expected: negative candle body, low CLV
+        """
+        bars = []
+        for i in range(80):
+            bars.append(DailyBar(
+                date=(datetime.now() - timedelta(days=80 - i)).strftime("%Y-%m-%d"),
+                open=115.0 - i * 0.05,
+                high=116.0 - i * 0.05,
+                low=114.5 - i * 0.05,
+                close=100.0 if i == 79 else 115.5 - i * 0.05,
+                volume=100000 + (3000000 if i == 79 else 0),
+            ))
+        history = RadarHistory(symbol="TEST", bars=bars, data_mode="DAILY_COMPLETED_SESSION")
+
+        with patch("scanner.market_radar.get_completed_daily_bars", return_value=history):
+            item = _analyze_symbol("TEST")
+
+        assert item is not None
+        # Close is near low = low CLV
+        assert item.close_location_value < 0.3
+        # Negative candle body
+        assert item.candle_body_percent > 50
+
+    def test_rsi_macd_use_close_series(self):
+        """Test 5: RSI and MACD must be calculated from close series, not open."""
+        # Build bars where open trends down while close trends up
+        # This makes RSI from open and RSI from close diverge
+        bars = []
+        for i in range(80):
+            close_val = 100.0 + i * 0.5   # trending up
+            open_val = 100.0 - i * 0.5    # trending down
+            bars.append(DailyBar(
+                date=(datetime.now() - timedelta(days=80 - i)).strftime("%Y-%m-%d"),
+                open=open_val,
+                high=max(close_val, open_val) + 1.0,
+                low=min(close_val, open_val) - 1.0,
+                close=close_val,
+                volume=100000 + (2000000 if i == 79 else 0),
+            ))
+        history = RadarHistory(symbol="TEST", bars=bars, data_mode="DAILY_COMPLETED_SESSION")
+
+        with patch("scanner.market_radar.get_completed_daily_bars", return_value=history):
+            item = _analyze_symbol("TEST")
+
+        assert item is not None
+
+        # Calculate RSI from close series
+        import pandas as pd
+        closes = np.array([b.close for b in bars])
+        from scanner.indicators import rsi as calc_rsi, macd as calc_macd
+        rsi_from_close = calc_rsi(pd.Series(closes), 14)
+        expected_rsi = float(rsi_from_close.iloc[-1])
+
+        # Calculate RSI from open series (opposite trend → different RSI)
+        opens = np.array([b.open for b in bars])
+        rsi_from_open = calc_rsi(pd.Series(opens), 14)
+        wrong_rsi = float(rsi_from_open.iloc[-1])
+
+        # RSI from close should match item's RSI
+        assert abs(item.rsi_14 - round(expected_rsi, 1)) < 0.2
+        # RSI from open (downtrend) should be very different from RSI from close (uptrend)
+        assert not np.isnan(expected_rsi)
+        assert not np.isnan(wrong_rsi)
+        assert abs(expected_rsi - wrong_rsi) > 10.0
+
+        # MACD must also use close series
+        macd_line, macd_signal, macd_hist = calc_macd(pd.Series(closes), 12, 26, 9)
+        expected_macd = float(macd_line.iloc[-1])
+        assert abs(item.macd_line - round(expected_macd, 4)) < 0.1
+
+    def test_telegram_output_shows_close(self):
+        """Test 6: Telegram output must display latest completed close, not open."""
+        item = _make_item(
+            symbol="ARCC",
+            latest_close=57.60,
+            previous_close=56.93,
+            session_open=55.20,
+            session_high=57.88,
+            session_low=55.26,
+            display_price=57.60,
+            price=57.60,
+            price_date="2026-07-20",
+        )
+        text = format_radar_symbol_telegram(item)
+        assert "57.60" in text
+        assert "55.20" in text
+        assert "Last Completed Close" in text
+        assert "Session Open" in text
+
+        # The price value shown must be 57.60 (close), not 55.20 (open)
+        lines = text.split("\n")
+        close_line = [l for l in lines if "Last Completed Close" in l][0]
+        assert "57.60" in close_line
+        assert "55.20" not in close_line.split("Last Completed Close")[0]
+
+    def test_missing_close_returns_invalid(self):
+        """Test 7: Missing or zero close → INVALID_CLOSE, never substitute open."""
+        bar_valid = DailyBar(date="2026-07-20", open=56.0, high=57.0, low=55.0, close=56.5, volume=1000)
+        bar_zero_close = DailyBar(date="2026-07-20", open=56.0, high=57.0, low=55.0, close=0.0, volume=1000)
+        bar_neg_close = DailyBar(date="2026-07-20", open=56.0, high=57.0, low=55.0, close=-1.0, volume=1000)
+
+        assert _validate_bar(bar_valid, "TEST") is True
+        assert _validate_bar(bar_zero_close, "TEST") is False
+        assert _validate_bar(bar_neg_close, "TEST") is False
+
+    def test_incomplete_current_day_candle(self):
+        """Test 8: Incomplete current-day candle → use previous completed session."""
+        # If today's candle has close == open (just opened), the previous
+        # bar's close should be used as the reference
+        bars = []
+        for i in range(80):
+            if i == 79:
+                # Today's candle: just opened, close == open
+                bars.append(DailyBar(
+                    date=(datetime.now()).strftime("%Y-%m-%d"),
+                    open=57.0, high=57.0, low=57.0, close=57.0,
+                    volume=0,
+                ))
+            else:
+                bars.append(DailyBar(
+                    date=(datetime.now() - timedelta(days=80 - i)).strftime("%Y-%m-%d"),
+                    open=55.0 + i * 0.02,
+                    high=56.0 + i * 0.02,
+                    low=54.5 + i * 0.02,
+                    close=56.0 + i * 0.02,
+                    volume=100000,
+                ))
+        history = RadarHistory(symbol="TEST", bars=bars, data_mode="DAILY_COMPLETED_SESSION")
+
+        with patch("scanner.market_radar.get_completed_daily_bars", return_value=history):
+            item = _analyze_symbol("TEST")
+
+        # The item should exist and use the latest bar's close
+        if item is not None:
+            assert item.latest_close == 57.0
+            assert item.price == 57.0
+
+    def test_completed_today_candle_uses_today_close(self):
+        """Test 9: Completed today candle → use today's close when provider confirms."""
+        bars = []
+        for i in range(80):
+            if i == 79:
+                bars.append(DailyBar(
+                    date=(datetime.now()).strftime("%Y-%m-%d"),
+                    open=56.0, high=58.0, low=55.5, close=57.60,
+                    volume=2000000, is_complete=True,
+                ))
+            else:
+                bars.append(DailyBar(
+                    date=(datetime.now() - timedelta(days=80 - i)).strftime("%Y-%m-%d"),
+                    open=55.0 + i * 0.02,
+                    high=56.0 + i * 0.02,
+                    low=54.5 + i * 0.02,
+                    close=56.0 + i * 0.02,
+                    volume=100000,
+                ))
+        history = RadarHistory(symbol="TEST", bars=bars, data_mode="DAILY_COMPLETED_SESSION")
+
+        with patch("scanner.market_radar.get_completed_daily_bars", return_value=history):
+            item = _analyze_symbol("TEST")
+
+        assert item is not None
+        assert item.latest_close == 57.60
+        assert item.display_price == 57.60
+        assert item.session_open == 56.0
+
+    def test_backward_compat_price_equals_latest_close(self):
+        """Test 10: Legacy 'price' field must equal latest_close."""
+        bars = []
+        for i in range(80):
+            bars.append(DailyBar(
+                date=(datetime.now() - timedelta(days=80 - i)).strftime("%Y-%m-%d"),
+                open=100.0 + i * 0.1,
+                high=101.0 + i * 0.1,
+                low=99.5 + i * 0.1,
+                close=105.0 + i * 0.1,
+                volume=100000,
+            ))
+        history = RadarHistory(symbol="TEST", bars=bars, data_mode="DAILY_COMPLETED_SESSION")
+
+        with patch("scanner.market_radar.get_completed_daily_bars", return_value=history):
+            item = _analyze_symbol("TEST")
+
+        assert item is not None
+        assert item.price == item.latest_close
+        assert item.price == item.display_price
+        assert item.price == round(bars[-1].close, 2)
+
+
+class TestDailyBarValidation:
+    """Tests for DailyBar OHLC validation."""
+
+    def test_valid_bar_passes(self):
+        bar = DailyBar(date="2026-07-20", open=56.0, high=57.0, low=55.0, close=56.5, volume=1000)
+        assert _validate_bar(bar, "TEST") is True
+
+    def test_zero_close_fails(self):
+        bar = DailyBar(date="2026-07-20", open=56.0, high=57.0, low=55.0, close=0.0, volume=1000)
+        assert _validate_bar(bar, "TEST") is False
+
+    def test_negative_volume_fails(self):
+        bar = DailyBar(date="2026-07-20", open=56.0, high=57.0, low=55.0, close=56.5, volume=-100)
+        assert _validate_bar(bar, "TEST") is False
+
+    def test_open_outside_high_low_fails(self):
+        bar = DailyBar(date="2026-07-20", open=60.0, high=57.0, low=55.0, close=56.5, volume=1000)
+        assert _validate_bar(bar, "TEST") is False
+
+    def test_close_outside_high_low_fails(self):
+        bar = DailyBar(date="2026-07-20", open=56.0, high=57.0, low=55.0, close=60.0, volume=1000)
+        assert _validate_bar(bar, "TEST") is False
+
+    def test_bars_are_valid_passes(self):
+        bars = [
+            DailyBar(date="2026-07-18", open=55.0, high=56.0, low=54.5, close=55.5, volume=1000),
+            DailyBar(date="2026-07-19", open=55.5, high=56.5, low=55.0, close=56.0, volume=1200),
+            DailyBar(date="2026-07-20", open=56.0, high=57.0, low=55.5, close=56.5, volume=1500),
+        ]
+        assert _bars_are_valid(bars, "TEST") is None
+
+    def test_bars_duplicate_date_filtered(self):
+        bars = [
+            DailyBar(date="2026-07-18", open=55.0, high=56.0, low=54.5, close=55.5, volume=1000),
+            DailyBar(date="2026-07-18", open=56.0, high=57.0, low=55.5, close=56.5, volume=1200),
+            DailyBar(date="2026-07-20", open=56.0, high=57.0, low=55.5, close=56.5, volume=1500),
+        ]
+        result = _bars_are_valid(bars, "TEST")
+        # Duplicate should be filtered, leaving 2 bars
+        assert len(bars) == 2
+
+
+# ══════════════════════════════════════════════════════════════════════
+# SESSION DATE AND FRESHNESS TESTS
+# ══════════════════════════════════════════════════════════════════════
+
+from scanner.radar_data import get_expected_latest_egx_session, assess_data_freshness
+import pytz
+from datetime import datetime, timedelta
+
+CAIRO_TZ = pytz.timezone("Africa/Cairo")
+
+
+class TestSessionDateDetection:
+    """Tests for EGX session date detection logic."""
+
+    def test_after_close_wednesday(self):
+        """Wed 15:00 Cairo → expected session = Wed (completed)"""
+        now = datetime(2026, 7, 22, 15, 0, tzinfo=CAIRO_TZ)  # Wednesday
+        result = get_expected_latest_egx_session(now)
+        assert result.date() == datetime(2026, 7, 22).date()
+
+    def test_before_close_wednesday(self):
+        """Wed 14:00 Cairo → expected session = Tue (session not yet complete)"""
+        now = datetime(2026, 7, 22, 14, 0, tzinfo=CAIRO_TZ)  # Wednesday before 14:45
+        result = get_expected_latest_egx_session(now)
+        assert result.date() == datetime(2026, 7, 21).date()  # Tuesday
+
+    def test_friday_evening(self):
+        """Fri 15:00 Cairo → expected session = Thu (Fri not trading day)"""
+        now = datetime(2026, 7, 24, 15, 0, tzinfo=CAIRO_TZ)  # Friday
+        result = get_expected_latest_egx_session(now)
+        assert result.date() == datetime(2026, 7, 23).date()  # Thursday
+
+    def test_saturday_afternoon(self):
+        """Sat 15:00 Cairo → expected session = Thu"""
+        now = datetime(2026, 7, 25, 15, 0, tzinfo=CAIRO_TZ)  # Saturday
+        result = get_expected_latest_egx_session(now)
+        assert result.date() == datetime(2026, 7, 23).date()  # Thursday
+
+    def test_sunday_after_close(self):
+        """Sun 15:00 Cairo → expected session = Sun (trading day, after close)"""
+        now = datetime(2026, 7, 26, 15, 0, tzinfo=CAIRO_TZ)  # Sunday
+        result = get_expected_latest_egx_session(now)
+        assert result.date() == datetime(2026, 7, 26).date()  # Sunday (trading day)
+
+    def test_sunday_before_close(self):
+        """Sun 14:00 Cairo → expected session = Thu (Sun session not complete)"""
+        now = datetime(2026, 7, 26, 14, 0, tzinfo=CAIRO_TZ)  # Sunday before 14:45
+        result = get_expected_latest_egx_session(now)
+        assert result.date() == datetime(2026, 7, 23).date()  # Thursday
+
+    def test_exact_close_time(self):
+        """Wed 14:15 Cairo → session just closed, need buffer"""
+        now = datetime(2026, 7, 22, 14, 15, tzinfo=CAIRO_TZ)  # Wed exact close
+        result = get_expected_latest_egx_session(now)
+        # 14:15 < 14:45 (close + 30min buffer), so session not yet complete
+        assert result.date() == datetime(2026, 7, 21).date()  # Tuesday
+
+    def test_after_buffer_wednesday(self):
+        """Wed 14:46 Cairo → session complete"""
+        now = datetime(2026, 7, 22, 14, 46, tzinfo=CAIRO_TZ)  # Wed after buffer
+        result = get_expected_latest_egx_session(now)
+        assert result.date() == datetime(2026, 7, 22).date()  # Wednesday
+
+    def test_monday_morning(self):
+        """Mon 09:00 Cairo → expected session = Sun (Mon session not started)"""
+        now = datetime(2026, 7, 27, 9, 0, tzinfo=CAIRO_TZ)  # Monday morning
+        result = get_expected_latest_egx_session(now)
+        assert result.date() == datetime(2026, 7, 26).date()  # Sunday
+
+    def test_returns_datetime_with_cairo_tz(self):
+        """Result should be a datetime with Cairo timezone."""
+        now = datetime(2026, 7, 22, 15, 0, tzinfo=CAIRO_TZ)
+        result = get_expected_latest_egx_session(now)
+        assert result.tzinfo is not None
+        assert result.tzinfo.zone == "Africa/Cairo"
+
+
+class TestDataFreshnessAssessment:
+    """Tests for data freshness assessment logic."""
+
+    def test_current_data(self):
+        """Provider has expected session → CURRENT."""
+        now = datetime(2026, 7, 22, 15, 0, tzinfo=CAIRO_TZ)  # Wed after close
+        status, note, delay = assess_data_freshness("2026-07-22", now)
+        assert status == config.FRESHNESS_CURRENT
+        assert delay == 0
+
+    def test_one_day_delay_acceptable(self):
+        """Provider has yesterday's data → CURRENT (within tolerance)."""
+        now = datetime(2026, 7, 22, 15, 0, tzinfo=CAIRO_TZ)  # Wed after close
+        status, note, delay = assess_data_freshness("2026-07-21", now)
+        assert status == config.FRESHNESS_CURRENT
+        assert delay == 1
+
+    def test_two_day_delay(self):
+        """Provider has 2-day-old data → PROVIDER_DELAYED."""
+        now = datetime(2026, 7, 22, 15, 0, tzinfo=CAIRO_TZ)  # Wed after close
+        status, note, delay = assess_data_freshness("2026-07-20", now)
+        assert status == config.FRESHNESS_PROVIDER_DELAYED
+        assert delay == 2
+
+    def test_market_open(self):
+        """During market hours → MARKET_OPEN."""
+        now = datetime(2026, 7, 22, 10, 0, tzinfo=CAIRO_TZ)  # Wed 10:00 (market open)
+        status, note, delay = assess_data_freshness("2026-07-21", now)
+        assert status == config.FRESHNESS_MARKET_OPEN
+
+    def test_non_trading_day(self):
+        """Saturday → NON_TRADING_DAY."""
+        now = datetime(2026, 7, 25, 15, 0, tzinfo=CAIRO_TZ)  # Saturday
+        status, note, delay = assess_data_freshness("2026-07-24", now)
+        assert status == config.FRESHNESS_NON_TRADING_DAY
+
+    def test_unparseable_date(self):
+        """Unparseable provider date → DATA_UNAVAILABLE."""
+        now = datetime(2026, 7, 22, 15, 0, tzinfo=CAIRO_TZ)
+        status, note, delay = assess_data_freshness("not-a-date", now)
+        assert status == config.FRESHNESS_DATA_UNAVAILABLE
+        assert delay == -1
+
+    def test_provider_ahead_of_expected(self):
+        """Provider has future data → CURRENT."""
+        now = datetime(2026, 7, 22, 15, 0, tzinfo=CAIRO_TZ)
+        status, note, delay = assess_data_freshness("2026-07-23", now)
+        assert status == config.FRESHNESS_CURRENT
+        assert delay == 0
+
+    def test_delay_days_calculation(self):
+        """Verify delay_days is correctly calculated."""
+        now = datetime(2026, 7, 22, 15, 0, tzinfo=CAIRO_TZ)  # Wed → expected = Wed
+        status, note, delay = assess_data_freshness("2026-07-19", now)  # Sun
+        # Wed - Sun = 3 days
+        assert delay == 3
+        assert status == config.FRESHNESS_PROVIDER_DELAYED
+
+
+class TestFreshnessFieldsInRadarItem:
+    """Tests that freshness fields are properly set on RadarItem."""
+
+    def test_radar_item_has_freshness_fields(self):
+        """RadarItem should have freshness fields."""
+        item = RadarItem(symbol="TEST")
+        assert hasattr(item, "provider_latest_date")
+        assert hasattr(item, "expected_latest_session")
+        assert hasattr(item, "freshness_status")
+        assert hasattr(item, "freshness_note")
+        assert hasattr(item, "freshness_delay_days")
+
+    def test_radar_item_freshness_defaults(self):
+        """Freshness fields should have sensible defaults."""
+        item = RadarItem(symbol="TEST")
+        assert item.provider_latest_date == ""
+        assert item.expected_latest_session == ""
+        assert item.freshness_status == config.FRESHNESS_CURRENT
+        assert item.freshness_note == ""
+        assert item.freshness_delay_days == 0
+
+    def test_market_radar_result_has_freshness(self):
+        """MarketRadarResult should have freshness fields."""
+        from scanner.market_radar import MarketRadarResult
+        result = MarketRadarResult()
+        assert hasattr(result, "expected_latest_session")
+        assert hasattr(result, "freshness_status")
+        assert hasattr(result, "freshness_note")

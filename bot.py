@@ -37,11 +37,14 @@ from providers.egxapi_provider import get_provider as get_egxapi, QuoteState
 
 load_dotenv()
 
+# ── Version ──────────────────────────────────────────────────────────
+RADAR_VERSION = "2.0-session-freshness-fix"
+
 # ── Trading Hours Config ──────────────────────────────────────────────
 CAIRO_TZ = pytz.timezone("Africa/Cairo")
 TRADING_START = time(9, 35)
 TRADING_END = time(14, 35)
-TRADING_DAYS = [0, 1, 2, 3, 4]  # Sunday=0, Thursday=4
+TRADING_DAYS = [0, 1, 2, 3, 6]  # Sunday=6, Monday=0, Tuesday=1, Wednesday=2, Thursday=3
 
 TOKEN = os.getenv("BOT_TOKEN", "")
 LOG_DIR = Path("logs")
@@ -319,6 +322,8 @@ async def handle_radar_category(ctx: MsgContext, category: str) -> None:
     lines = [
         f"{cat_emoji} {cat_name}",
         f"Date: {result.data_date}",
+        f"Expected: {result.expected_latest_session}",
+        f"Freshness: {result.freshness_status}",
         f"Found: {len(category_items)}",
         "",
     ]
@@ -326,7 +331,7 @@ async def handle_radar_category(ctx: MsgContext, category: str) -> None:
     for i, item in enumerate(category_items[:15], 1):
         rsi_arrow = "\u2191" if item.rsi_change > 0 else "\u2193" if item.rsi_change < 0 else "\u2192"
         lines.append(f"{i}. {item.symbol} \u2014 Activity {item.activity_score}/100")
-        lines.append(f"Price: {item.price:.2f} ({item.price_change_percent:+.1f}%)")
+        lines.append(f"Last Completed Close: {item.latest_close:.2f} ({item.price_change_percent:+.1f}%)")
         lines.append(f"Volume: {item.rvol_20:.1f}x | RSI: {item.rsi_14:.0f} {rsi_arrow}")
         lines.append(f"Label: {item.activity_label}")
         if item.reasons:
@@ -348,7 +353,7 @@ async def handle_radar_category(ctx: MsgContext, category: str) -> None:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "  EGX Lite Market Radar v2.0\n"
+        f"  EGX Lite Market Radar {RADAR_VERSION}\n"
         "  Shariah-compliant stocks\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "Market activity scanner.\n"
@@ -855,6 +860,35 @@ def main() -> None:
             "Set in .env:\n"
             "BOT_TOKEN=your_token_here"
         )
+
+    # ── Startup Diagnostics ──────────────────────────────────────────
+    import subprocess
+    project_path = os.path.dirname(os.path.abspath(__file__))
+    radar_output_path = os.path.join(project_path, "scanner", "radar_output.py")
+    print("=" * 60)
+    print(f"  EGX LITE MARKET RADAR {RADAR_VERSION}")
+    print("=" * 60)
+    print(f"  Project Path      : {project_path}")
+    print(f"  radar_output.py   : {radar_output_path}")
+    print(f"  radar_output.py exists: {os.path.exists(radar_output_path)}")
+    try:
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=project_path, stderr=subprocess.DEVNULL
+        ).decode().strip()
+        commit = subprocess.check_output(
+            ["git", "log", "--oneline", "-1"],
+            cwd=project_path, stderr=subprocess.DEVNULL
+        ).decode().strip()
+        print(f"  Git Branch        : {branch}")
+        print(f"  Git Commit        : {commit}")
+    except Exception as e:
+        print(f"  Git info unavailable: {e}")
+    print(f"  Python            : {sys.version}")
+    print(f"  Trading Days      : {TRADING_DAYS} (Sun-Thu)")
+    print(f"  Version           : {RADAR_VERSION}")
+    print("=" * 60)
+    print()
 
     application = (
         Application.builder()

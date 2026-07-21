@@ -33,30 +33,61 @@ _LEVEL_EMOJI = {
     ActivityLevel.NORMAL: "\u26aa",
 }
 
+_FRESHNESS_LABEL = {
+    config.FRESHNESS_CURRENT: "CURRENT",
+    config.FRESHNESS_PROVIDER_DELAYED: "PROVIDER_DELAYED",
+    config.FRESHNESS_MARKET_OPEN: "MARKET_OPEN",
+    config.FRESHNESS_NON_TRADING_DAY: "NON_TRADING_DAY",
+    config.FRESHNESS_DATA_UNAVAILABLE: "DATA_UNAVAILABLE",
+}
+
+_FRESHNESS_STYLE = {
+    config.FRESHNESS_CURRENT: "green",
+    config.FRESHNESS_PROVIDER_DELAYED: "bold yellow",
+    config.FRESHNESS_MARKET_OPEN: "bold cyan",
+    config.FRESHNESS_NON_TRADING_DAY: "dim",
+    config.FRESHNESS_DATA_UNAVAILABLE: "bold red",
+}
+
 
 # ─── Console Output ──────────────────────────────────────────────────
 def print_radar_header(result: MarketRadarResult):
     """Print the radar scan header."""
     stats = result.stats
+    freshness_label = _FRESHNESS_LABEL.get(result.freshness_status, result.freshness_status)
+    freshness_style = _FRESHNESS_STYLE.get(result.freshness_status, "")
+
     lines = [
         "=" * 60,
         "",
         "    EGX LITE MARKET RADAR",
         "",
-        f"  Data Mode       : {result.data_mode}",
-        f"  Data Date       : {result.data_date}",
-        f"  Scanned         : {stats.symbols_scanned}",
-        f"  Activity Found  : {stats.activity_detected}",
-        f"  Buying Activity : {stats.buying_count}",
-        f"  Selling Activity: {stats.selling_count}",
-        f"  Unusual Activity: {stats.unusual_count}",
-        f"  Failed          : {stats.failed_count}",
-        f"  Skipped (illiq) : {stats.skipped_illiquid}",
-        f"  Duration        : {stats.scan_duration}s",
+        f"  Data Mode           : {result.data_mode}",
+        f"  Data Date           : {result.data_date}",
+        f"  Expected Session    : {result.expected_latest_session}",
+        f"  Freshness           : {freshness_label}",
+        f"  Freshness Note      : {result.freshness_note}",
+        "",
+        f"  Scanned             : {stats.symbols_scanned}",
+        f"  Activity Found      : {stats.activity_detected}",
+        f"  Buying Activity     : {stats.buying_count}",
+        f"  Selling Activity    : {stats.selling_count}",
+        f"  Unusual Activity    : {stats.unusual_count}",
+        f"  Failed              : {stats.failed_count}",
+        f"  Skipped (illiq)     : {stats.skipped_illiquid}",
+        f"  Duration            : {stats.scan_duration}s",
         "",
         "=" * 60,
     ]
     console.print("\n".join(lines))
+
+    if result.freshness_status == config.FRESHNESS_PROVIDER_DELAYED:
+        console.print(
+            f"\n  ⚠ Provider delay detected — data is {result.freshness_note}",
+            style="bold yellow",
+        )
+        console.print("  ⚠ Activity signals may be based on stale data", style="bold yellow")
+        console.print("")
 
 
 def print_radar_table(result: MarketRadarResult):
@@ -78,7 +109,7 @@ def print_radar_table(result: MarketRadarResult):
         table.add_column("#", style="dim", width=3, justify="right")
         table.add_column("Ticker", style="bold cyan", width=8)
         table.add_column("Name", width=12)
-        table.add_column("Price", justify="right", width=8)
+        table.add_column("Close", justify="right", width=8)
         table.add_column("Chg%", justify="right", width=6)
         table.add_column("Score", justify="right", width=5, style="bold")
         table.add_column("Level", width=9)
@@ -104,7 +135,7 @@ def print_radar_table(result: MarketRadarResult):
                 str(i),
                 item.symbol,
                 name,
-                f"{item.price:.2f}",
+                f"{item.latest_close:.2f}",
                 f"{item.price_change_percent:+.1f}%",
                 f"{item.activity_score}",
                 f"{level_emoji} {item.activity_level}",
@@ -117,7 +148,7 @@ def print_radar_table(result: MarketRadarResult):
     # Print reasons for top items
     for i, item in enumerate(result.items[:5], 1):
         console.print(f"\n  #{i} {item.symbol} — {item.activity_label}", style="bold")
-        console.print(f"  Price: {item.price:.2f} ({item.price_change_percent:+.1f}%)  Volume: {item.rvol_20:.1f}x  RSI: {item.rsi_14:.0f}")
+        console.print(f"  Close: {item.latest_close:.2f} ({item.price_change_percent:+.1f}%)  Open: {item.session_open:.2f}  Volume: {item.rvol_20:.1f}x  RSI: {item.rsi_14:.0f}")
         for reason in item.reasons:
             console.print(f"    • {reason}", style="dim")
 
@@ -154,14 +185,23 @@ def format_radar_telegram(result: MarketRadarResult, top_n: int | None = None) -
     stats = result.stats
     items = result.items[:top_n]
 
+    freshness_label = _FRESHNESS_LABEL.get(result.freshness_status, result.freshness_status)
+
     lines = [
-        "\U0001f4e1 EGX LITE MARKET RADAR",
+        "\U0001f4e1 EGX LITE MARKET RADAR v2.0-session-freshness-fix",
         f"Data: Latest completed session",
         f"Date: {result.data_date}",
+        f"Expected: {result.expected_latest_session}",
+        f"Freshness: {freshness_label}",
         f"Scanned: {stats.symbols_scanned}",
         f"Activity detected: {stats.activity_detected}",
         "",
     ]
+
+    if result.freshness_status == config.FRESHNESS_PROVIDER_DELAYED:
+        lines.append(f"⚠ Provider delay: {result.freshness_note}")
+        lines.append("⚠ Activity signals may be based on stale data")
+        lines.append("")
 
     # ── Buying Activity ───────────────────────────────────────────────
     buying = [i for i in items if i.activity_category == ActivityCategory.BUYING]
@@ -171,7 +211,8 @@ def format_radar_telegram(result: MarketRadarResult, top_n: int | None = None) -
         for i, item in enumerate(buying, 1):
             rsi_arrow = "\u2191" if item.rsi_change > 0 else "\u2193" if item.rsi_change < 0 else "\u2192"
             lines.append(f"{i}. {item.symbol} \u2014 Activity {item.activity_score}/100")
-            lines.append(f"Price: {item.price:.2f} ({item.price_change_percent:+.1f}%)")
+            lines.append(f"Last Completed Close: {item.latest_close:.2f} ({item.price_change_percent:+.1f}%)")
+            lines.append(f"Session Open: {item.session_open:.2f}")
             lines.append(f"Volume: {item.rvol_20:.1f}x average")
             lines.append(f"RSI: {item.rsi_14:.0f} {rsi_arrow}")
             hist_arrow = "Improving" if item.macd_histogram_change > 0 else "Weakening"
@@ -191,7 +232,8 @@ def format_radar_telegram(result: MarketRadarResult, top_n: int | None = None) -
         for i, item in enumerate(selling, 1):
             rsi_arrow = "\u2191" if item.rsi_change > 0 else "\u2193" if item.rsi_change < 0 else "\u2192"
             lines.append(f"{i}. {item.symbol} \u2014 Activity {item.activity_score}/100")
-            lines.append(f"Price: {item.price:.2f} ({item.price_change_percent:+.1f}%)")
+            lines.append(f"Last Completed Close: {item.latest_close:.2f} ({item.price_change_percent:+.1f}%)")
+            lines.append(f"Session Open: {item.session_open:.2f}")
             lines.append(f"Volume: {item.rvol_20:.1f}x average")
             lines.append(f"RSI: {item.rsi_14:.0f} {rsi_arrow}")
             hist_arrow = "Improving" if item.macd_histogram_change > 0 else "Weakening"
@@ -210,7 +252,8 @@ def format_radar_telegram(result: MarketRadarResult, top_n: int | None = None) -
         lines.append("")
         for i, item in enumerate(unusual, 1):
             lines.append(f"{i}. {item.symbol} \u2014 Activity {item.activity_score}/100")
-            lines.append(f"Price: {item.price:.2f} ({item.price_change_percent:+.1f}%)")
+            lines.append(f"Last Completed Close: {item.latest_close:.2f} ({item.price_change_percent:+.1f}%)")
+            lines.append(f"Session Open: {item.session_open:.2f}")
             lines.append(f"Volume: {item.rvol_20:.1f}x average")
             lines.append(f"Label: {item.activity_label}")
             if item.reasons:
@@ -235,6 +278,7 @@ def format_radar_symbol_telegram(item: RadarItem) -> str:
     """Format a single symbol radar result for Telegram."""
     rsi_arrow = "\u2191" if item.rsi_change > 0 else "\u2193" if item.rsi_change < 0 else "\u2192"
     cat_emoji = _ACTIVITY_EMOJI.get(item.activity_category, "\u26aa")
+    freshness_label = _FRESHNESS_LABEL.get(item.freshness_status, item.freshness_status)
 
     lines = [
         f"{cat_emoji} RADAR \u2014 {item.symbol}",
@@ -245,7 +289,19 @@ def format_radar_symbol_telegram(item: RadarItem) -> str:
         f"Activity Type   : {item.activity_category}",
         f"Label           : {item.activity_label}",
         "",
-        f"Price           : {item.price:.2f} ({item.price_change_percent:+.1f}%)",
+        f"Last Completed Close : {item.latest_close:.2f} ({item.price_change_percent:+.1f}%)",
+        f"Session Open         : {item.session_open:.2f}",
+        f"Session High         : {item.session_high:.2f}",
+        f"Session Low          : {item.session_low:.2f}",
+        f"Previous Close       : {item.previous_close:.2f}",
+        f"Session Date         : {item.price_date}",
+        f"Data Mode            : {item.data_mode}",
+        "",
+        f"Provider Latest      : {item.provider_latest_date}",
+        f"Expected Session     : {item.expected_latest_session}",
+        f"Freshness            : {freshness_label}",
+        f"Freshness Note       : {item.freshness_note}",
+        "",
         f"Volume          : {item.rvol_20:.1f}x average",
         f"Traded Value    : {item.traded_value:,.0f} EGP",
         "",

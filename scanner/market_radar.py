@@ -28,7 +28,7 @@ import numpy as np
 from . import config
 from .data_provider import get_all_tickers
 from .indicators import rsi as calc_rsi, macd as calc_macd, ema as calc_ema
-from .radar_data import get_completed_daily_bars, get_live_quote, RadarHistory, RadarQuote
+from .radar_data import get_completed_daily_bars, get_live_quote, RadarHistory, RadarQuote, FAILURE_INVALID_OHLC, FAILURE_INVALID_CLOSE
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +61,19 @@ _LEVEL_ORDER = {
 class RadarItem:
     symbol: str
     company_name: str = ""
-    price: float = 0.0
-    price_date: str = ""
+
+    # ── Explicit OHLC fields (canonical completed-session values) ────
+    latest_close: float = 0.0          # Official close of latest completed session
+    previous_close: float = 0.0        # Official close of immediately preceding session
+    session_open: float = 0.0          # Opening price of latest completed session
+    session_high: float = 0.0          # High of latest completed session
+    session_low: float = 0.0           # Low of latest completed session
+    display_price: float = 0.0         # Must equal latest_close
+    price_date: str = ""               # Date of the latest completed session
+
+    # ── Legacy field (backward compat, DEPRECATED) ───────────────────
+    price: float = 0.0                 # DEPRECATED: use display_price / latest_close
+
     price_change_percent: float = 0.0
     volume: int = 0
     average_volume_20: float = 0.0
@@ -95,6 +106,13 @@ class RadarItem:
     price_return_5d: Optional[float] = None
     price_return_20d: Optional[float] = None
 
+    # ── Data freshness fields ───────────────────────────────────────
+    provider_latest_date: str = ""     # Latest date from provider (YYYY-MM-DD)
+    expected_latest_session: str = ""  # Expected latest EGX session (YYYY-MM-DD)
+    freshness_status: str = config.FRESHNESS_CURRENT
+    freshness_note: str = ""
+    freshness_delay_days: int = 0
+
 
 @dataclass
 class RadarStats:
@@ -114,6 +132,9 @@ class MarketRadarResult:
     timestamp: str = ""
     data_mode: str = config.DATA_MODE_DAILY
     data_date: str = ""
+    expected_latest_session: str = ""
+    freshness_status: str = config.FRESHNESS_CURRENT
+    freshness_note: str = ""
     stats: RadarStats = field(default_factory=RadarStats)
     items: list[RadarItem] = field(default_factory=list)
     all_items: list[RadarItem] = field(default_factory=list)
@@ -124,6 +145,13 @@ def _analyze_symbol(symbol: str) -> Optional[RadarItem]:
     """
     Analyze a single symbol for radar metrics.
     Returns None if the symbol fails validation.
+
+    OHLC Rules:
+      - latest_close = bars[-1].close  (official session close)
+      - previous_close = bars[-2].close
+      - display_price = latest_close
+      - price = latest_close  (legacy compat)
+      - Never use open in place of close.
     """
     # ── Fetch data ────────────────────────────────────────────────────
     history = get_completed_daily_bars(
@@ -146,6 +174,7 @@ def _analyze_symbol(symbol: str) -> Optional[RadarItem]:
     opens = np.array([b.open for b in bars], dtype=np.float64)
 
     # ── Latest completed session ──────────────────────────────────────
+    latest_bar = bars[-1]
     latest_close = closes[-1]
     latest_volume = int(volumes[-1])
     latest_high = highs[-1]
@@ -153,12 +182,20 @@ def _analyze_symbol(symbol: str) -> Optional[RadarItem]:
     latest_open = opens[-1]
     price_date = bars[-1].date
 
+    # ── Data integrity: close must be positive ────────────────────────
+    if latest_close <= 0 or not np.isfinite(latest_close):
+        logger.debug("Radar: %s skipped — invalid close %.4f", symbol, latest_close)
+        return None
+
     if latest_volume < 0:
         logger.debug("Radar: %s skipped — negative volume", symbol)
         return None
 
     # ── Previous session ──────────────────────────────────────────────
     prev_close = closes[-2] if len(closes) >= 2 else latest_close
+    if prev_close <= 0 or not np.isfinite(prev_close):
+        prev_close = latest_close
+
     price_change = latest_close - prev_close
     price_change_pct = (price_change / prev_close * 100) if prev_close != 0 else 0.0
 
@@ -190,7 +227,7 @@ def _analyze_symbol(symbol: str) -> Optional[RadarItem]:
     avg_traded_value_20_calc = float(np.mean(traded_values[-20:]))
     traded_value_ratio = (latest_traded_value / avg_traded_value_20_calc) if avg_traded_value_20_calc > 0 else 0.0
 
-    # ── RSI ───────────────────────────────────────────────────────────
+    # ── RSI (input: CLOSE series only) ───────────────────────────────
     import pandas as pd
     close_series = pd.Series(closes)
     rsi_series = calc_rsi(close_series, config.RADAR_RSI_LENGTH)
@@ -198,7 +235,7 @@ def _analyze_symbol(symbol: str) -> Optional[RadarItem]:
     rsi_prev = float(rsi_series.iloc[-2]) if len(rsi_series) >= 2 and not np.isnan(rsi_series.iloc[-2]) else rsi_14
     rsi_change = rsi_14 - rsi_prev
 
-    # ── MACD ──────────────────────────────────────────────────────────
+    # ── MACD (input: CLOSE series only) ──────────────────────────────
     macd_line, macd_signal, macd_hist = calc_macd(
         close_series, config.RADAR_MACD_FAST, config.RADAR_MACD_SLOW, config.RADAR_MACD_SIGNAL,
     )
@@ -213,7 +250,7 @@ def _analyze_symbol(symbol: str) -> Optional[RadarItem]:
     if config.RADAR_ENABLE_ADX_CONTEXT:
         adx_14 = _calculate_adx(highs, lows, closes, 14)
 
-    # ── Candle metrics ────────────────────────────────────────────────
+    # ── Candle metrics (using CLOSE, not open) ────────────────────────
     body_range = abs(latest_close - latest_open)
     full_range = latest_high - latest_low
     candle_body_pct = (body_range / full_range * 100) if full_range > 0 else 0.0
@@ -237,12 +274,20 @@ def _analyze_symbol(symbol: str) -> Optional[RadarItem]:
     # ── Company name ──────────────────────────────────────────────────
     company_name = config.STOCK_NAMES.get(symbol, symbol)
 
-    # ── Build RadarItem ───────────────────────────────────────────────
+    # ── Build RadarItem (explicit OHLC mapping) ──────────────────────
     item = RadarItem(
         symbol=symbol,
         company_name=company_name,
-        price=round(latest_close, 2),
+        # Explicit OHLC fields
+        latest_close=round(latest_close, 2),
+        previous_close=round(prev_close, 2),
+        session_open=round(latest_open, 2),
+        session_high=round(latest_high, 2),
+        session_low=round(latest_low, 2),
+        display_price=round(latest_close, 2),
         price_date=price_date,
+        # Legacy compat — price must equal latest_close
+        price=round(latest_close, 2),
         price_change_percent=round(price_change_pct, 2),
         volume=latest_volume,
         average_volume_20=round(avg_vol_20, 0),
@@ -267,6 +312,12 @@ def _analyze_symbol(symbol: str) -> Optional[RadarItem]:
         volume_percentile_60=round(volume_percentile, 1),
         price_return_5d=price_return_5d,
         price_return_20d=price_return_20d,
+        # Data freshness fields
+        provider_latest_date=history.provider_latest_date,
+        expected_latest_session=history.expected_latest_session,
+        freshness_status=history.freshness_status,
+        freshness_note=history.freshness_note,
+        freshness_delay_days=history.freshness_delay_days,
     )
 
     # ── Score ─────────────────────────────────────────────────────────
@@ -731,16 +782,27 @@ def run_market_radar(
 
     # ── Data date ─────────────────────────────────────────────────────
     data_date = ""
+    expected_session = ""
+    freshness_status = config.FRESHNESS_CURRENT
+    freshness_note = ""
     if all_items:
         dates = [i.price_date for i in all_items if i.price_date]
         if dates:
             data_date = max(dates)
+        # Use first item's freshness (all items share the same provider/session)
+        first_item = all_items[0]
+        expected_session = first_item.expected_latest_session
+        freshness_status = first_item.freshness_status
+        freshness_note = first_item.freshness_note
 
     # ── Build result ──────────────────────────────────────────────────
     result = MarketRadarResult(
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         data_mode=config.DATA_MODE_DAILY,
         data_date=data_date,
+        expected_latest_session=expected_session,
+        freshness_status=freshness_status,
+        freshness_note=freshness_note,
         stats=stats,
         items=items[:top_n],
         all_items=all_items,
