@@ -107,6 +107,19 @@ def print_detail_table(results: list[dict]):
         console.print(f"  EMA20: {r['ema20']}  EMA50: {r['ema50']}  EMA200: {r['ema200']}")
         console.print(f"  RSI: {r['rsi']}  MACD: {r['macd_hist']}  RVOL: {r['rvol']}")
         console.print(f"  POC: {r['vp']['poc']} ({r['vp']['distance_from_poc_pct']}%)  Res: {r['resistance']} ({r['resistance_dist_pct']}%)")
+
+        price_type = r.get("price_type", "N/A")
+        quote_source = r.get("quote_source", "N/A")
+        quote_time = r.get("quote_time", "N/A")
+        hist_close = r.get("historical_close", "N/A")
+        session_open = r.get("session_open", "N/A")
+        prev_close = r.get("previous_close", "N/A")
+        pt_style = "bold green" if price_type == "LAST_TRADE" else "bold yellow" if price_type == "DAILY_CLOSE" else "bold red"
+        console.print(f"  Price Type: [{pt_style}]{price_type}[/]  Source: {quote_source}", style=pt_style)
+        if hist_close != r["close"]:
+            console.print(f"  Hist Close: {hist_close}  Session Open: {session_open}  Prev Close: {prev_close}", style="dim")
+        console.print(f"  Quote Time: {quote_time}", style="dim")
+
         for reason in r.get("reasons", []):
             style = "green" if reason.startswith("✓") else "red" if reason.startswith("✗") else "yellow"
             console.print(f"    {reason}", style=style)

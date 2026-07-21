@@ -1,13 +1,18 @@
 """
 Full technical analysis for a single stock.
 Steps 2–10 of the specification.
+
+Price Selection:
+  - displayed_price comes from live quote (fast_info / info / daily candle)
+  - Indicator calculations (EMA, RSI, MACD, ATR) use historical daily Close
+  - Never use Open as current price
 """
 
 import pandas as pd
 from . import config
 from .indicators import ema, rsi, macd, atr, find_resistance
 from .volume_profile import build_volume_profile
-from .data_provider import fetch_history
+from .data_provider import fetch_history, fetch_live_quote
 from .filters import trend_filter
 
 
@@ -22,12 +27,26 @@ def analyze(ticker: str) -> dict:
     low = data["Low"].astype(float)
     volume = data["Volume"].astype(float)
 
+    # ── Live Quote ───────────────────────────────────────────────────
+    quote = fetch_live_quote(ticker)
+
+    # Historical Close for indicator calculations
+    hist_close = round(float(close.iloc[-1]), 2)
+
+    # Live price for displayed price
+    if quote["last_traded_price"] is not None and quote["last_traded_price"] > 0:
+        displayed_price = quote["last_traded_price"]
+    else:
+        displayed_price = hist_close
+
+    # Use displayed_price for price-dependent calculations
+    last_close = displayed_price
+
     # ── Step 2: EMA Indicators ────────────────────────────────────────
     ema200_series = ema(close, config.EMA_SLOW)
     ema50_series = ema(close, config.EMA_MID)
     ema20_series = ema(close, config.EMA_FAST)
 
-    last_close = round(float(close.iloc[-1]), 2)
     last_ema20 = round(float(ema20_series.iloc[-1]), 2)
     last_ema50 = round(float(ema50_series.iloc[-1]), 2)
     last_ema200 = round(float(ema200_series.iloc[-1]), 2)
@@ -99,6 +118,14 @@ def analyze(ticker: str) -> dict:
     return {
         "ticker": ticker,
         "close": last_close,
+        "historical_close": hist_close,
+        "session_open": quote["session_open"],
+        "previous_close": quote["previous_close"],
+        "session_high": quote["session_high"],
+        "session_low": quote["session_low"],
+        "price_type": quote["price_type"],
+        "quote_time": quote["quote_time"],
+        "quote_source": quote["source"],
         "ema20": last_ema20,
         "ema50": last_ema50,
         "ema200": last_ema200,
