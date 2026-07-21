@@ -928,11 +928,11 @@ class TestDataFreshnessAssessment:
         assert status == config.FRESHNESS_CURRENT
         assert delay == 0
 
-    def test_one_day_delay_acceptable(self):
-        """Provider has yesterday's data → CURRENT (within tolerance)."""
+    def test_one_day_delay_is_provider_delayed(self):
+        """Provider has yesterday's data → PROVIDER_DELAYED (no tolerance)."""
         now = datetime(2026, 7, 22, 15, 0, tzinfo=CAIRO_TZ)  # Wed after close
         status, note, delay = assess_data_freshness("2026-07-21", now)
-        assert status == config.FRESHNESS_CURRENT
+        assert status == config.FRESHNESS_PROVIDER_DELAYED
         assert delay == 1
 
     def test_two_day_delay(self):
@@ -976,6 +976,19 @@ class TestDataFreshnessAssessment:
         assert delay == 3
         assert status == config.FRESHNESS_PROVIDER_DELAYED
 
+    def test_production_case_provider_2026_07_20_expected_2026_07_21(self):
+        """Regression: production case — provider 2026-07-20, expected 2026-07-21.
+        
+        This is the exact production bug scenario. Provider latest = 2026-07-20,
+        expected session = 2026-07-21 (Tuesday). Status must be PROVIDER_DELAYED.
+        """
+        # Tuesday 2026-07-21 15:00 Cairo — market closed, expected session = Tue 2026-07-21
+        now = datetime(2026, 7, 21, 15, 0, tzinfo=CAIRO_TZ)
+        status, note, delay = assess_data_freshness("2026-07-20", now)
+        assert status == config.FRESHNESS_PROVIDER_DELAYED
+        assert delay == 1
+        assert "delayed" in note.lower()
+
 
 class TestFreshnessFieldsInRadarItem:
     """Tests that freshness fields are properly set on RadarItem."""
@@ -994,7 +1007,7 @@ class TestFreshnessFieldsInRadarItem:
         item = RadarItem(symbol="TEST")
         assert item.provider_latest_date == ""
         assert item.expected_latest_session == ""
-        assert item.freshness_status == config.FRESHNESS_CURRENT
+        assert item.freshness_status == ""
         assert item.freshness_note == ""
         assert item.freshness_delay_days == 0
 

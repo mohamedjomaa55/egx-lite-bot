@@ -109,7 +109,7 @@ class RadarItem:
     # ── Data freshness fields ───────────────────────────────────────
     provider_latest_date: str = ""     # Latest date from provider (YYYY-MM-DD)
     expected_latest_session: str = ""  # Expected latest EGX session (YYYY-MM-DD)
-    freshness_status: str = config.FRESHNESS_CURRENT
+    freshness_status: str = ""
     freshness_note: str = ""
     freshness_delay_days: int = 0
 
@@ -133,8 +133,9 @@ class MarketRadarResult:
     data_mode: str = config.DATA_MODE_DAILY
     data_date: str = ""
     expected_latest_session: str = ""
-    freshness_status: str = config.FRESHNESS_CURRENT
+    freshness_status: str = ""
     freshness_note: str = ""
+    freshness_delay_days: int = 0
     stats: RadarStats = field(default_factory=RadarStats)
     items: list[RadarItem] = field(default_factory=list)
     all_items: list[RadarItem] = field(default_factory=list)
@@ -783,8 +784,9 @@ def run_market_radar(
     # ── Data date ─────────────────────────────────────────────────────
     data_date = ""
     expected_session = ""
-    freshness_status = config.FRESHNESS_CURRENT
+    freshness_status = ""
     freshness_note = ""
+    freshness_delay_days = 0
     if all_items:
         dates = [i.price_date for i in all_items if i.price_date]
         if dates:
@@ -794,6 +796,7 @@ def run_market_radar(
         expected_session = first_item.expected_latest_session
         freshness_status = first_item.freshness_status
         freshness_note = first_item.freshness_note
+        freshness_delay_days = first_item.freshness_delay_days
 
     # ── Build result ──────────────────────────────────────────────────
     result = MarketRadarResult(
@@ -803,6 +806,7 @@ def run_market_radar(
         expected_latest_session=expected_session,
         freshness_status=freshness_status,
         freshness_note=freshness_note,
+        freshness_delay_days=freshness_delay_days,
         stats=stats,
         items=items[:top_n],
         all_items=all_items,

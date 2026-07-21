@@ -176,8 +176,8 @@ def assess_data_freshness(
     if delay_days < 0:
         return config.FRESHNESS_CURRENT, "Provider has future data", 0
 
-    if delay_days <= config.FRESHNESS_MAX_ACCEPTABLE_DELAY_DAYS:
-        return config.FRESHNESS_CURRENT, f"Data is {delay_days} day(s) old (acceptable)", delay_days
+    if delay_days == 0:
+        return config.FRESHNESS_CURRENT, "Data matches expected session", 0
 
     return config.FRESHNESS_PROVIDER_DELAYED, f"Provider delayed {delay_days} day(s)", delay_days
 

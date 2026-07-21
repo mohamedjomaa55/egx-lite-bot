@@ -57,16 +57,28 @@ def print_radar_header(result: MarketRadarResult):
     freshness_label = _FRESHNESS_LABEL.get(result.freshness_status, result.freshness_status)
     freshness_style = _FRESHNESS_STYLE.get(result.freshness_status, "")
 
+    data_label = (
+        "Data Mode (delayed)  :"
+        if result.freshness_status == config.FRESHNESS_PROVIDER_DELAYED
+        else "Data Mode           :"
+    )
+
     lines = [
         "=" * 60,
         "",
         "    EGX LITE MARKET RADAR",
         "",
-        f"  Data Mode           : {result.data_mode}",
+        f"  {data_label} {result.data_mode}",
         f"  Data Date           : {result.data_date}",
         f"  Expected Session    : {result.expected_latest_session}",
         f"  Freshness           : {freshness_label}",
         f"  Freshness Note      : {result.freshness_note}",
+    ]
+
+    if result.freshness_status == config.FRESHNESS_PROVIDER_DELAYED:
+        lines.append(f"  Provider Delay Days : {result.freshness_delay_days}")
+
+    lines.extend([
         "",
         f"  Scanned             : {stats.symbols_scanned}",
         f"  Activity Found      : {stats.activity_detected}",
@@ -78,7 +90,7 @@ def print_radar_header(result: MarketRadarResult):
         f"  Duration            : {stats.scan_duration}s",
         "",
         "=" * 60,
-    ]
+    ])
     console.print("\n".join(lines))
 
     if result.freshness_status == config.FRESHNESS_PROVIDER_DELAYED:
@@ -187,16 +199,28 @@ def format_radar_telegram(result: MarketRadarResult, top_n: int | None = None) -
 
     freshness_label = _FRESHNESS_LABEL.get(result.freshness_status, result.freshness_status)
 
+    data_label = (
+        "Data: Latest available completed session"
+        if result.freshness_status == config.FRESHNESS_PROVIDER_DELAYED
+        else "Data: Latest completed session"
+    )
+
     lines = [
         "\U0001f4e1 EGX LITE MARKET RADAR v2.0-session-freshness-fix",
-        f"Data: Latest completed session",
+        data_label,
         f"Date: {result.data_date}",
         f"Expected: {result.expected_latest_session}",
         f"Freshness: {freshness_label}",
+    ]
+
+    if result.freshness_status == config.FRESHNESS_PROVIDER_DELAYED:
+        lines.append(f"Provider Delay Days: {result.freshness_delay_days}")
+
+    lines.extend([
         f"Scanned: {stats.symbols_scanned}",
         f"Activity detected: {stats.activity_detected}",
         "",
-    ]
+    ])
 
     if result.freshness_status == config.FRESHNESS_PROVIDER_DELAYED:
         lines.append(f"⚠ Provider delay: {result.freshness_note}")

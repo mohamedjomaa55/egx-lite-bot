@@ -161,8 +161,7 @@ FRESHNESS_MARKET_OPEN = "MARKET_OPEN"
 FRESHNESS_NON_TRADING_DAY = "NON_TRADING_DAY"
 FRESHNESS_DATA_UNAVAILABLE = "DATA_UNAVAILABLE"
 
-# Maximum acceptable provider delay (in days) before warning
-FRESHNESS_MAX_ACCEPTABLE_DELAY_DAYS = 1
+
 
 # ── Data Mode Constants ──────────────────────────────────────────────
 DATA_MODE_DAILY = "DAILY_COMPLETED_SESSION"

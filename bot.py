@@ -32,7 +32,7 @@ from scanner.ism_handoff import create_handoff
 from scanner import config
 from scanner.config import DATA_PROVIDER
 from scanner.decisions import DECISION_EMOJI
-from scanner.radar_output import format_radar_telegram, format_radar_symbol_telegram
+from scanner.radar_output import format_radar_telegram, format_radar_symbol_telegram, _FRESHNESS_LABEL
 from providers.egxapi_provider import get_provider as get_egxapi, QuoteState
 
 load_dotenv()
@@ -319,14 +319,22 @@ async def handle_radar_category(ctx: MsgContext, category: str) -> None:
         ActivityCategory.UNUSUAL: "UNUSUAL ACTIVITY",
     }.get(category, "ACTIVITY")
 
+    freshness_label = _FRESHNESS_LABEL.get(result.freshness_status, result.freshness_status)
+
     lines = [
         f"{cat_emoji} {cat_name}",
         f"Date: {result.data_date}",
         f"Expected: {result.expected_latest_session}",
-        f"Freshness: {result.freshness_status}",
+        f"Freshness: {freshness_label}",
+    ]
+
+    if result.freshness_status == config.FRESHNESS_PROVIDER_DELAYED:
+        lines.append(f"Provider Delay Days: {result.freshness_delay_days}")
+
+    lines.extend([
         f"Found: {len(category_items)}",
         "",
-    ]
+    ])
 
     for i, item in enumerate(category_items[:15], 1):
         rsi_arrow = "\u2191" if item.rsi_change > 0 else "\u2193" if item.rsi_change < 0 else "\u2192"
