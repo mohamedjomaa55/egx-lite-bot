@@ -32,7 +32,14 @@ from scanner.ism_handoff import create_handoff
 from scanner import config
 from scanner.config import DATA_PROVIDER
 from scanner.decisions import DECISION_EMOJI
-from scanner.radar_output import format_radar_telegram, format_radar_symbol_telegram, _FRESHNESS_LABEL
+from scanner.radar_output import (
+    format_radar_telegram,
+    format_radar_telegram_v2,
+    format_radar_symbol_telegram,
+    format_radar_footer,
+    format_radar_category_section,
+    _FRESHNESS_LABEL,
+)
 from providers.egxapi_provider import get_provider as get_egxapi, QuoteState
 
 load_dotenv()
@@ -281,8 +288,9 @@ async def handle_radar(ctx: MsgContext, top_n: int = 20) -> None:
         _last_radar["result"] = result
         _last_radar["timestamp"] = datetime.now()
 
-        text = format_radar_telegram(result, top_n=top_n)
-        await ctx.send(text)
+        messages = format_radar_telegram_v2(result, top_n=top_n)
+        for msg in messages:
+            await ctx.send(msg)
 
     except Exception as e:
         logger.error("Radar scan failed: %s", e)
@@ -291,7 +299,6 @@ async def handle_radar(ctx: MsgContext, top_n: int = 20) -> None:
 
 async def handle_radar_category(ctx: MsgContext, category: str) -> None:
     """Show stocks from a specific activity category."""
-    # Use cached radar if available, otherwise run fresh
     if _last_radar["result"] is not None:
         result = _last_radar["result"]
     else:
@@ -309,54 +316,15 @@ async def handle_radar_category(ctx: MsgContext, category: str) -> None:
         i for i in result.all_items if i.activity_category == category
     ]
 
-    cat_emoji = {
-        ActivityCategory.BUYING: "\U0001f7e2",
-        ActivityCategory.SELLING: "\U0001f534",
-        ActivityCategory.UNUSUAL: "\U0001f7e1",
-    }.get(category, "\u26aa")
+    header = format_radar_header(result, len(result.items))
+    section = format_radar_category_section(category, category_items[:15])
+    footer = format_radar_footer()
 
-    cat_name = {
-        ActivityCategory.BUYING: "BUYING ACTIVITY",
-        ActivityCategory.SELLING: "SELLING ACTIVITY",
-        ActivityCategory.UNUSUAL: "UNUSUAL ACTIVITY",
-    }.get(category, "ACTIVITY")
-
-    freshness_label = _FRESHNESS_LABEL.get(result.freshness_status, result.freshness_status)
-
-    lines = [
-        f"{cat_emoji} {cat_name}",
-        f"Date: {result.data_date}",
-        f"Expected: {result.expected_latest_session}",
-        f"Freshness: {freshness_label}",
-    ]
-
-    if result.freshness_status == config.FRESHNESS_PROVIDER_DELAYED:
-        lines.append(f"Provider Delay Days: {result.freshness_delay_days}")
-
-    lines.extend([
-        f"Found: {len(category_items)}",
-        "",
-    ])
-
-    for i, item in enumerate(category_items[:15], 1):
-        rsi_arrow = "\u2191" if item.rsi_change > 0 else "\u2193" if item.rsi_change < 0 else "\u2192"
-        lines.append(f"{i}. {item.symbol} \u2014 Activity {item.activity_score}/100")
-        lines.append(f"Last Completed Close: {item.latest_close:.2f} ({item.price_change_percent:+.1f}%)")
-        lines.append(f"Volume: {item.rvol_20:.1f}x | RSI: {item.rsi_14:.0f} {rsi_arrow}")
-        lines.append(f"Label: {item.activity_label}")
-        if item.reasons:
-            for r in item.reasons[:2]:
-                lines.append(f"\u2022 {r}")
-        lines.append("")
-
-    if not category_items:
-        lines.append("No stocks in this category.")
-
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("Lite detects activity only.")
-    lines.append("Use ISM for complete analysis.")
-
-    await ctx.send("\n".join(lines), reply_markup=back_button())
+    messages = [header, section, footer]
+    from scanner.radar_output import split_radar_messages
+    split = split_radar_messages(messages)
+    for msg in split:
+        await ctx.send(msg, reply_markup=back_button())
 
 
 # ── Start Command ─────────────────────────────────────────────────────

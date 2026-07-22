@@ -4,6 +4,7 @@ Radar Output — Console and Telegram formatters for Market Radar.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 
 from rich.console import Console
@@ -17,6 +18,38 @@ from .market_radar import (
     ActivityCategory,
     ActivityLevel,
 )
+
+TELEGRAM_MAX_LENGTH = 4096
+
+_CAT_LABEL = {
+    ActivityCategory.BUYING: "BUYING SIGNALS",
+    ActivityCategory.SELLING: "SELLING SIGNALS",
+    ActivityCategory.UNUSUAL: "WATCHLIST ACTIVITY",
+}
+
+_CAT_EMOJI = {
+    ActivityCategory.BUYING: "\U0001f7e2",
+    ActivityCategory.SELLING: "\U0001f534",
+    ActivityCategory.UNUSUAL: "\U0001f7e1",
+}
+
+_LABEL_DISPLAY = {
+    "Strong buying activity": "\U0001f3af STRONG BUYING",
+    "Possible accumulation": "\U0001f3af POSSIBLE ACCUMULATION",
+    "Moderate buying activity": "\U0001f3af MODERATE BUYING",
+    "Strong selling pressure": "\u26a0\ufe0f STRONG SELLING",
+    "Possible distribution": "\u26a0\ufe0f POSSIBLE DISTRIBUTION",
+    "Moderate selling activity": "\u26a0\ufe0f MODERATE SELLING",
+    "Unusual activity \u2014 direction unclear": "\U0001f440 DIRECTION UNCLEAR",
+}
+
+_STATUS_DISPLAY = {
+    config.FRESHNESS_CURRENT: ("\u2705 CLOSED", False),
+    config.FRESHNESS_PROVIDER_DELAYED: ("\u26a0\ufe0f DELAYED", True),
+    config.FRESHNESS_MARKET_OPEN: ("\U0001f7e2 OPEN", False),
+    config.FRESHNESS_NON_TRADING_DAY: ("\u26aa CLOSED", False),
+    config.FRESHNESS_DATA_UNAVAILABLE: ("\U0001f534 DATA UNAVAILABLE", False),
+}
 
 console = Console()
 
@@ -48,6 +81,235 @@ _FRESHNESS_STYLE = {
     config.FRESHNESS_NON_TRADING_DAY: "dim",
     config.FRESHNESS_DATA_UNAVAILABLE: "bold red",
 }
+
+_SEP = "\u2501" * 24
+
+
+# ─── Card-Style Telegram Helpers ──────────────────────────────────────
+def build_activity_bar(score: int, category: str) -> str:
+    filled = round(score / 10)
+    filled = max(0, min(10, filled))
+    empty = 10 - filled
+
+    if category == ActivityCategory.BUYING:
+        bar = "\U0001f7e9" * filled + "\u2b1c" * empty
+        label = f"{score}%"
+        return f"{bar} {label}"
+    elif category == ActivityCategory.SELLING:
+        filled_full = score // 10
+        remainder = score % 10
+        has_partial = remainder >= 5
+        full_blocks = filled_full if not has_partial else filled_full + 1
+        full_blocks = max(0, min(10, full_blocks))
+        empty = 10 - full_blocks
+        bar = "\U0001f534" * full_blocks + "\U0001f7e7" * empty
+        return f"{bar} {score}%"
+    else:
+        bar = "\U0001f7e8" * filled + "\u2b1c" * empty
+        return f"{bar} {score}%"
+
+
+def format_market_status(freshness_status: str) -> str:
+    display = _STATUS_DISPLAY.get(freshness_status, ("\u26aa UNKNOWN", False))
+    return display[0]
+
+
+def _has_delay(freshness_status: str) -> bool:
+    display = _STATUS_DISPLAY.get(freshness_status, ("", False))
+    return display[1]
+
+
+def _date_dd_mon_yyyy(date_str: str) -> str:
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        return dt.strftime("%d %b %Y")
+    except (ValueError, TypeError):
+        return date_str
+
+
+def format_short_reason(reason: str, category: str) -> str:
+    lower = reason.lower()
+    if "rvol" in lower and "versus" in lower:
+        return "High relative volume"
+    if "volume" in lower and "average" in lower:
+        return "High relative volume"
+    if "traded value" in lower and "above" in lower:
+        return "Strong traded value"
+    if "traded value" in lower and "below" in lower:
+        return "Weak traded value"
+    if "rsi" in lower and "rose" in lower:
+        return "RSI rising"
+    if "rsi" in lower and "fell" in lower:
+        return "RSI falling"
+    if "close finished near the session high" in lower:
+        return "Closed near session high"
+    if "close finished near the session low" in lower:
+        return "Closed near session low"
+    if "macd histogram improving" in lower:
+        return "MACD improving"
+    if "macd histogram weakening" in lower:
+        return "MACD weakening"
+    if "high volume with limited price" in lower:
+        return "Volume without movement"
+    if "price rose" in lower:
+        return f"Price up {reason.split('rose')[1].split('on')[0].strip()}"
+    if "price fell" in lower:
+        return f"Price down {reason.split('fell')[1].split('on')[0].strip()}"
+    if "volume at" in lower and "percentile" in lower:
+        return "Volume at high percentile"
+    if "5-day return" in lower:
+        return "5-day return"
+    return reason
+
+
+def format_stock_card(item: RadarItem, category: str, rank: int) -> str:
+    cat_emoji = _CAT_EMOJI.get(category, "\u26aa")
+    bar = build_activity_bar(item.activity_score, category)
+
+    chg_pct = item.price_change_percent
+    chg_icon = "\u2705" if chg_pct >= 0 else "\u274c"
+
+    lines = [
+        _SEP,
+        f"{cat_emoji} {rank}. {item.symbol}",
+        "",
+        bar,
+        "",
+        f"\U0001f4b0 {item.latest_close:.2f}  ({chg_pct:+.1f}%)",
+        f"\u21b3 Open: {item.session_open:.2f}",
+        "",
+    ]
+
+    if item.rvol_20 > 0:
+        if item.rvol_20 >= 2.0:
+            vol_icon = "\U0001f4c8"
+        elif item.rvol_20 >= 1.0:
+            vol_icon = "\U0001f4c8"
+        else:
+            vol_icon = "\U0001f4c9"
+        lines.append(f"{vol_icon} RVOL: {item.rvol_20:.1f}x")
+
+    if item.rsi_14 and item.rsi_14 != 50.0:
+        rsi_arrow = "\u2191" if item.rsi_change > 0 else "\u2193" if item.rsi_change < 0 else "\u2192"
+        lines.append(f"\U0001f4ca RSI: {item.rsi_14:.0f} {rsi_arrow}")
+
+    if item.macd_histogram_change != 0:
+        hist_label = "Improving" if item.macd_histogram_change > 0 else "Weakening"
+        lines.append(f"\u26a1 MACD: {hist_label}")
+
+    lines.append("")
+
+    label_display = _LABEL_DISPLAY.get(item.activity_label, item.activity_label.upper())
+    lines.append(label_display)
+
+    if item.reasons:
+        for r in item.reasons[:3]:
+            short = format_short_reason(r, category)
+            marker = chg_icon if category == ActivityCategory.BUYING and short in ("RSI rising", "MACD improving") else "\u274c" if category == ActivityCategory.SELLING and short in ("RSI falling", "MACD weakening") else "\u26a1"
+            lines.append(f"{marker} {short}")
+
+    return "\n".join(lines)
+
+
+def format_radar_header(result: MarketRadarResult, top_n: int) -> str:
+    status_text = format_market_status(result.freshness_status)
+    session_date = _date_dd_mon_yyyy(result.data_date)
+
+    buying = sum(1 for i in result.all_items if i.activity_category == ActivityCategory.BUYING)
+    selling = sum(1 for i in result.all_items if i.activity_category == ActivityCategory.SELLING)
+    unusual = sum(1 for i in result.all_items if i.activity_category == ActivityCategory.UNUSUAL)
+    total_signals = len(result.items)
+
+    lines = [
+        _SEP,
+        "\U0001f4e1 EGX LITE MARKET RADAR",
+        "",
+        f"\U0001f4c5 Session: {session_date}",
+        f"{status_text.split(' ')[0]} Market: {status_text.split(' ', 1)[1] if ' ' in status_text else status_text}",
+        f"\U0001f4ca Scanned: {result.stats.symbols_scanned}",
+        f"\U0001f3af Signals: {total_signals}",
+        "",
+        f"\U0001f7e2 BUY: {buying}   \U0001f534 SELL: {selling}   \U0001f7e1 WATCH: {unusual}",
+        _SEP,
+    ]
+
+    if _has_delay(result.freshness_status):
+        lines.insert(-1, f"\u26a0\ufe0f Provider delay: {result.freshness_note}")
+
+    return "\n".join(lines)
+
+
+def format_radar_footer() -> str:
+    return (
+        f"{_SEP}\n"
+        "\u2139\ufe0f Lite detects market activity\n"
+        "\U0001f4c8 Use ISM for Entry, Stop Loss and Targets\n"
+        f"{_SEP}"
+    )
+
+
+def format_radar_category_section(category: str, items: list[RadarItem], start_rank: int = 1) -> str:
+    cat_emoji = _CAT_EMOJI.get(category, "\u26aa")
+    cat_label = _CAT_LABEL.get(category, "ACTIVITY")
+    cards = [format_stock_card(item, category, start_rank + i) for i, item in enumerate(items)]
+    header = f"{cat_emoji} {cat_label}"
+    return header + "\n" + "\n".join(cards)
+
+
+def split_radar_messages(parts: list[str], max_length: int = TELEGRAM_MAX_LENGTH) -> list[str]:
+    if not parts:
+        return ["\u26a0\ufe0f No significant activity detected in this scan."]
+
+    messages = []
+    current = ""
+
+    for part in parts:
+        candidate = current + ("\n" if current else "") + part
+        if len(candidate) <= max_length:
+            current = candidate
+        elif current:
+            messages.append(current)
+            current = part
+        else:
+            while len(part) > max_length:
+                messages.append(part[:max_length])
+                part = part[max_length:]
+            current = part
+
+    if current:
+        messages.append(current)
+
+    return messages if messages else ["\u26a0\ufe0f No significant activity detected in this scan."]
+
+
+def format_radar_telegram_v2(result: MarketRadarResult, top_n: int | None = None) -> list[str]:
+    if top_n is None:
+        top_n = config.RADAR_TOP_N
+
+    items = result.items[:top_n]
+
+    parts = [format_radar_header(result, top_n)]
+
+    categories = [
+        (ActivityCategory.BUYING, "\U0001f7e2"),
+        (ActivityCategory.SELLING, "\U0001f534"),
+        (ActivityCategory.UNUSUAL, "\U0001f7e1"),
+    ]
+
+    for cat, emoji in categories:
+        cat_items = [i for i in items if i.activity_category == cat]
+        if cat_items:
+            cat_header = f"{emoji} {_CAT_LABEL[cat]}"
+            parts.append(cat_header)
+            for i, item in enumerate(cat_items, 1):
+                parts.append(format_stock_card(item, cat, i))
+
+    if not items:
+        parts.append("\u26a0\ufe0f No significant activity detected in this scan.")
+
+    parts.append(format_radar_footer())
+
+    return split_radar_messages(parts)
 
 
 # ─── Console Output ──────────────────────────────────────────────────
