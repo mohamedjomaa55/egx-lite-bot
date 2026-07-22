@@ -38,6 +38,7 @@ from scanner.radar_output import (
     format_radar_symbol_telegram,
     format_radar_footer,
     format_radar_category_section,
+    RADAR_FORMATTER_VERSION,
     _FRESHNESS_LABEL,
 )
 from providers.egxapi_provider import get_provider as get_egxapi, QuoteState
@@ -196,6 +197,28 @@ async def radar_unusual_command(update: Update, context: ContextTypes.DEFAULT_TY
     """Handle /radar_unusual — show UNUSUAL_ACTIVITY stocks."""
     ctx = MsgContext(update)
     await handle_radar_category(ctx, ActivityCategory.UNUSUAL)
+
+
+async def radar_format_version_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /radar_format_version — show formatter version and runtime path."""
+    import scanner.radar_output as radar_mod
+    module_file = getattr(radar_mod, "__file__", "unknown")
+    commit = "unknown"
+    try:
+        import subprocess
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        pass
+    text = (
+        f"Radar Formatter: {RADAR_FORMATTER_VERSION}\n"
+        f"Module: {module_file}\n"
+        f"Commit: {commit}"
+    )
+    await update.message.reply_text(text)
 
 
 async def radar_symbol_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -818,6 +841,7 @@ async def post_init(application: Application) -> None:
         BotCommand("radar_buying", "Buying activity"),
         BotCommand("radar_selling", "Selling activity"),
         BotCommand("radar_unusual", "Unusual activity"),
+        BotCommand("radar_format_version", "Formatter version info"),
         BotCommand("radar_symbol", "Single symbol radar"),
         BotCommand("send_to_ism", "Prepare ISM handoff"),
         BotCommand("scan", "Legacy scan (deprecated)"),
@@ -865,6 +889,10 @@ def main() -> None:
     print(f"  Python            : {sys.version}")
     print(f"  Trading Days      : {TRADING_DAYS} (Sun-Thu)")
     print(f"  Version           : {RADAR_VERSION}")
+    print(f"  Formatter Version : {RADAR_FORMATTER_VERSION}")
+    import scanner.radar_output as _radar_mod
+    print(f"  Radar Output Path : {getattr(_radar_mod, '__file__', 'unknown')}")
+    print(f"  Format V2 Func    : {format_radar_telegram_v2.__module__}.{format_radar_telegram_v2.__qualname__}")
     print("=" * 60)
     print()
 
@@ -880,6 +908,7 @@ def main() -> None:
     application.add_handler(CommandHandler("radar_buying", radar_buying_command))
     application.add_handler(CommandHandler("radar_selling", radar_selling_command))
     application.add_handler(CommandHandler("radar_unusual", radar_unusual_command))
+    application.add_handler(CommandHandler("radar_format_version", radar_format_version_command))
     application.add_handler(CommandHandler("radar_symbol", radar_symbol_command))
     application.add_handler(CommandHandler("send_to_ism", send_to_ism_command))
     application.add_handler(CommandHandler("scan", scan_command))

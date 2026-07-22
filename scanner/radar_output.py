@@ -20,6 +20,7 @@ from .market_radar import (
 )
 
 TELEGRAM_MAX_LENGTH = 4096
+RADAR_FORMATTER_VERSION = "telegram-v2-78bb50f"
 
 _CAT_LABEL = {
     ActivityCategory.BUYING: "BUYING SIGNALS",

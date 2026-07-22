@@ -37,6 +37,8 @@ from scanner.radar_output import (
     format_radar_category_section,
     split_radar_messages,
     format_radar_telegram_v2,
+    format_radar_telegram,
+    RADAR_FORMATTER_VERSION,
     _date_dd_mon_yyyy,
     _has_delay,
 )
@@ -576,3 +578,91 @@ class TestRadarV2:
         full = "\n".join(messages)
         assert "Lite detects market activity" in full
         assert "ISM" in full
+
+
+# ══════════════════════════════════════════════════════════════════════
+# INTEGRATION TESTS — v2 formatter is the production path
+# ══════════════════════════════════════════════════════════════════════
+class TestV2Integration:
+    """Verify v2 output contains new strings and does NOT contain old strings."""
+
+    def _full_text(self, items=None, freshness=None):
+        if items is None:
+            items = [
+                _make_item(symbol="A", activity_category=ActivityCategory.BUYING),
+                _make_item(symbol="B", activity_category=ActivityCategory.SELLING),
+            ]
+        result = _make_result(items=items, freshness_status=freshness or config.FRESHNESS_CURRENT)
+        messages = format_radar_telegram_v2(result)
+        return "\n".join(messages)
+
+    def test_contains_new_header(self):
+        text = self._full_text()
+        assert "\U0001f4e1 EGX LITE MARKET RADAR" in text
+
+    def test_contains_buying_signals(self):
+        text = self._full_text()
+        assert "BUYING SIGNALS" in text
+
+    def test_contains_selling_signals(self):
+        text = self._full_text()
+        assert "SELLING SIGNALS" in text
+
+    def test_contains_progress_bar_blocks(self):
+        text = self._full_text()
+        assert "\U0001f7e9" in text or "\U0001f534" in text or "\U0001f7e8" in text
+
+    def test_contains_footer(self):
+        text = self._full_text()
+        assert "\u2139\ufe0f Lite detects market activity" in text
+
+    def test_does_not_contain_old_buying_activity(self):
+        text = self._full_text()
+        assert "BUYING ACTIVITY" not in text
+
+    def test_does_not_contain_old_selling_activity(self):
+        text = self._full_text()
+        assert "SELLING ACTIVITY" not in text
+
+    def test_does_not_contain_old_unusual_activity(self):
+        text = self._full_text()
+        assert "UNUSUAL ACTIVITY" not in text
+
+    def test_does_not_contain_old_last_completed_close(self):
+        text = self._full_text()
+        assert "Last Completed Close" not in text
+
+    def test_does_not_contain_old_activity_detected(self):
+        text = self._full_text()
+        assert "Activity detected:" not in text
+
+    def test_does_not_contain_old_lite_footer(self):
+        text = self._full_text()
+        assert "Lite detects activity only." not in text
+
+    def test_does_not_contain_old_ism_footer(self):
+        text = self._full_text()
+        assert "Use ISM for complete technical analysis" not in text
+
+    def test_v1_formatter_still_works_but_not_used_by_handlers(self):
+        """Old v1 formatter should still exist for backward compat but not be the production path."""
+        items = [_make_item(symbol="X", activity_category=ActivityCategory.BUYING)]
+        result = _make_result(items=items)
+        old_text = format_radar_telegram(result)
+        new_messages = format_radar_telegram_v2(result)
+        new_text = "\n".join(new_messages)
+        assert "BUYING ACTIVITY" in old_text
+        assert "BUYING SIGNALS" in new_text
+
+    def test_formatter_version_constant(self):
+        assert RADAR_FORMATTER_VERSION.startswith("telegram-v2-")
+
+    def test_all_handlers_use_v2(self):
+        """Verify bot.py does not call format_radar_telegram (v1) in any handler."""
+        import inspect
+        import bot as bot_module
+        source = inspect.getsource(bot_module)
+        v1_call_count = source.count("format_radar_telegram(")
+        v2_call_count = source.count("format_radar_telegram_v2(")
+        assert v2_call_count >= 1, "No v2 formatter calls found in bot.py"
+        assert v1_call_count == 0, f"Found {v1_call_count} v1 formatter calls in bot.py handlers"
