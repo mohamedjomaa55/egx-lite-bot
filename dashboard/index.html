@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EGX Lite Market Radar — Dashboard</title>
+    <link rel="stylesheet" href="/dashboard/style.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>EGX Lite Market Radar <span class="version">v2.0</span></h1>
+            <p class="subtitle">Shariah-Compliant Stocks &bull; أسهم متوافقة مع الشريعة</p>
+        </div>
+        <div class="header-right">
+            <div id="freshness-badge" class="badge badge-ok">CURRENT</div>
+            <div id="last-scan" class="meta">Last scan: --</div>
+            <button id="btn-refresh" class="btn btn-primary" onclick="refreshScan()">Refresh Scan</button>
+            <button id="btn-export-csv" class="btn" onclick="exportCSV()">Export CSV</button>
+        </div>
+    </header>
+
+    <div id="status-bar" class="status-bar hidden">
+        <span id="status-text">Scanning 34 symbols...</span>
+        <div class="spinner"></div>
+    </div>
+
+    <section class="summary-cards" id="summary-cards">
+        <div class="card">
+            <div class="card-value" id="stat-scanned">--</div>
+            <div class="card-label">Scanned / مسح</div>
+        </div>
+        <div class="card card-buy">
+            <div class="card-value" id="stat-buying">--</div>
+            <div class="card-label">Buying / شراء</div>
+        </div>
+        <div class="card card-sell">
+            <div class="card-value" id="stat-selling">--</div>
+            <div class="card-label">Selling / بيع</div>
+        </div>
+        <div class="card card-unusual">
+            <div class="card-value" id="stat-unusual">--</div>
+            <div class="card-label">Unusual / غير عادي</div>
+        </div>
+        <div class="card">
+            <div class="card-value" id="stat-delay">--</div>
+            <div class="card-label">Delay Days / تأخير</div>
+        </div>
+    </section>
+
+    <section class="freshness-info" id="freshness-info">
+        <div class="freshness-row">
+            <span class="freshness-label">Provider Latest Date:</span>
+            <span id="freshness-provider-date">--</span>
+        </div>
+        <div class="freshness-row">
+            <span class="freshness-label">Expected Latest Session:</span>
+            <span id="freshness-expected">--</span>
+        </div>
+        <div class="freshness-row">
+            <span class="freshness-label">Freshness Status:</span>
+            <span id="freshness-status">--</span>
+        </div>
+    </section>
+
+    <section class="controls">
+        <input type="text" id="search-box" placeholder="Search stocks / بحث... (e.g. ARCC, العربية)" oninput="filterTable()">
+        <div class="filter-group">
+            <button class="filter-btn active" data-filter="all" onclick="setFilter('all', this)">All الكل</button>
+            <button class="filter-btn" data-filter="BUYING_ACTIVITY" onclick="setFilter('BUYING_ACTIVITY', this)">Buying شراء</button>
+            <button class="filter-btn" data-filter="SELLING_ACTIVITY" onclick="setFilter('SELLING_ACTIVITY', this)">Selling بيع</button>
+            <button class="filter-btn" data-filter="UNUSUAL_ACTIVITY" onclick="setFilter('UNUSUAL_ACTIVITY', this)">Unusual غير عادي</button>
+        </div>
+    </section>
+
+    <section class="table-container">
+        <table id="stocks-table">
+            <thead>
+                <tr>
+                    <th class="sortable" data-col="symbol" onclick="sortTable('symbol')">Symbol <span class="sort-arrow"></span></th>
+                    <th class="sortable" data-col="company_name" onclick="sortTable('company_name')">Name الاسم</th>
+                    <th class="sortable num" data-col="latest_close" onclick="sortTable('latest_close')">Close السعر</th>
+                    <th class="sortable num" data-col="price_change_percent" onclick="sortTable('price_change_percent')">Chg%التغيير</th>
+                    <th class="sortable num" data-col="activity_score" onclick="sortTable('activity_score')">Score التقييم</th>
+                    <th class="sortable" data-col="activity_level" onclick="sortTable('activity_level')">Level المستوى</th>
+                    <th class="sortable" data-col="activity_category" onclick="sortTable('activity_category')">Category النوع</th>
+                    <th class="sortable num" data-col="rvol_20" onclick="sortTable('rvol_20')">RVOL</th>
+                    <th class="sortable num" data-col="rsi_14" onclick="sortTable('rsi_14')">RSI</th>
+                    <th>MACD</th>
+                </tr>
+            </thead>
+            <tbody id="stocks-tbody">
+                <tr><td colspan="10" class="loading">Loading data / جاري تحميل البيانات...</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section id="stock-detail" class="stock-detail hidden">
+        <div class="detail-header">
+            <h2 id="detail-title">--</h2>
+            <button class="btn" onclick="closeDetail()">Close / إغلاق</button>
+        </div>
+        <div class="detail-grid" id="detail-grid"></div>
+    </section>
+
+    <section class="history-section" id="history-section">
+        <h2>Scan History / سجل المسح</h2>
+        <table id="history-table">
+            <thead>
+                <tr>
+                    <th>Timestamp</th>
+                    <th>Symbols</th>
+                    <th>Activity</th>
+                    <th>Buying</th>
+                    <th>Selling</th>
+                    <th>Unusual</th>
+                    <th>Duration</th>
+                    <th>Freshness</th>
+                </tr>
+            </thead>
+            <tbody id="history-tbody">
+                <tr><td colspan="8" class="loading">No history yet</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <footer>
+        <p>EGX Lite Market Radar &mdash; Activity scanner, not trading advice.</p>
+        <p>يكتشف النشاط فقط &mdash; ليس نصيحة للتداول.</p>
+    </footer>
+
+    <script src="/dashboard/app.js"></script>
+</body>
+</html>
