@@ -32,6 +32,7 @@ HISTORY_FILE.parent.mkdir(exist_ok=True)
 _lock = threading.Lock()
 _cached_result = None
 _cached_timestamp = None
+_CACHE_TTL = 300
 
 
 def _result_to_dict(result):
@@ -164,10 +165,12 @@ def api_radar():
     global _cached_result, _cached_timestamp
 
     with _lock:
-        if _cached_result is not None:
-            return jsonify(_cached_result)
+        if _cached_result is not None and _cached_timestamp is not None:
+            age = time.time() - _cached_timestamp
+            if age < _CACHE_TTL:
+                return jsonify(_cached_result)
 
-    result = _run_scan()
+    result = _run_scan_fresh()
     result_dict = _result_to_dict(result)
     _save_history(result_dict)
 
