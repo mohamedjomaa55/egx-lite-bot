@@ -160,11 +160,37 @@ _last_scan: dict = {
     "timestamp": None,
 }
 
-# ── Radar Cache ───────────────────────────────────────────────────────
+# ── Radar Cache (TTL-protected) ───────────────────────────────────────
+_RADAR_CACHE_TTL = 300  # seconds
+
 _last_radar: dict = {
     "result": None,
     "timestamp": None,
 }
+
+# ── Async Lock for Concurrent Scan Safety ─────────────────────────────
+_radar_lock = asyncio.Lock()
+
+
+def _radar_cache_is_fresh() -> bool:
+    """Check if cached radar result is within TTL."""
+    if _last_radar["result"] is None or _last_radar["timestamp"] is None:
+        return False
+    age = (datetime.now() - _last_radar["timestamp"]).total_seconds()
+    return age < _RADAR_CACHE_TTL
+
+
+def _update_radar_cache(result) -> None:
+    """Update radar cache with fresh result."""
+    _last_radar["result"] = result
+    _last_radar["timestamp"] = datetime.now()
+
+
+def _run_radar_sync(top_n: int = 20):
+    """Run radar scan synchronously (for use inside async lock)."""
+    from scanner.data_provider import clear_cache
+    clear_cache()
+    return run_market_radar(top_n=top_n)
 
 
 # ── Radar Commands ────────────────────────────────────────────────────
@@ -298,18 +324,21 @@ async def send_to_ism_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ── Radar Handlers ────────────────────────────────────────────────────
 async def handle_radar(ctx: MsgContext, top_n: int = 20) -> None:
-    """Run market radar and send results."""
+    """Run market radar and send results.
+
+    Uses async lock so only one fresh scan runs at a time.
+    Concurrent requests reuse the newly completed result.
+    """
     await ctx.send(
         "\U0001f4e1 Running Market Radar...\n\u23f3 Scanning EGX symbols..."
     )
 
     try:
-        from scanner.data_provider import clear_cache
-        clear_cache()
-        result = await asyncio.to_thread(run_market_radar, top_n=top_n)
-
-        _last_radar["result"] = result
-        _last_radar["timestamp"] = datetime.now()
+        async with _radar_lock:
+            from scanner.data_provider import clear_cache
+            clear_cache()
+            result = await asyncio.to_thread(run_market_radar, top_n=top_n)
+            _update_radar_cache(result)
 
         messages = format_radar_telegram_v2(result, top_n=top_n)
         for msg in messages:
@@ -321,19 +350,30 @@ async def handle_radar(ctx: MsgContext, top_n: int = 20) -> None:
 
 
 async def handle_radar_category(ctx: MsgContext, category: str) -> None:
-    """Show stocks from a specific activity category."""
-    if _last_radar["result"] is not None:
+    """Show stocks from a specific activity category.
+
+    Uses TTL-protected cache. If cached result is older than _RADAR_CACHE_TTL
+    seconds or missing, runs a fresh scan under the async lock.
+    """
+    if _radar_cache_is_fresh():
         result = _last_radar["result"]
     else:
         await ctx.send("\U0001f4e1 Running Market Radar...")
         try:
-            result = await asyncio.to_thread(run_market_radar, top_n=50)
-            _last_radar["result"] = result
-            _last_radar["timestamp"] = datetime.now()
+            async with _radar_lock:
+                if not _radar_cache_is_fresh():
+                    result = await asyncio.to_thread(run_market_radar, top_n=50)
+                    _update_radar_cache(result)
+                else:
+                    result = _last_radar["result"]
         except Exception as e:
             logger.error("Radar scan failed: %s", e)
             await ctx.send(f"\u274c Radar scan failed: {e}", reply_markup=back_button())
             return
+
+    if result is None:
+        await ctx.send(f"\u274c No radar data available.", reply_markup=back_button())
+        return
 
     category_items = [
         i for i in result.all_items if i.activity_category == category

@@ -4,6 +4,7 @@ import numpy as np
 import httpx
 import pytz
 import time
+import copy
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -17,6 +18,7 @@ _CACHE_TTL = 300
 
 _TV_CACHE: dict[str, dict] = {}
 _TV_CACHE_TTL = 60
+_TV_CACHE_TS: float = 0.0
 _TV_SCAN_URL = "https://scanner.tradingview.com/egypt/scan"
 _TV_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -29,8 +31,10 @@ logger = logging.getLogger(__name__)
 
 def clear_cache():
     """Clear all data caches (Yahoo + TradingView)."""
+    global _TV_CACHE_TS
     _CACHE.clear()
     _TV_CACHE.clear()
+    _TV_CACHE_TS = 0.0
     logger.info("All data caches cleared")
 
 
@@ -47,11 +51,14 @@ def _is_market_hours() -> bool:
 def _tv_batch_fetch() -> dict[str, dict]:
     """Fetch all EGX stocks from TradingView scanner in a single batch request.
 
+    Uses a batch-level timestamp for cache validation instead of per-entry timestamps.
+
     Returns dict keyed by ticker symbol (e.g. 'EFIH') with values:
     {close, open, high, low, volume, change_pct, previous_close}
     """
+    global _TV_CACHE_TS
     now = time.time()
-    if _TV_CACHE and (now - list(_TV_CACHE.values())[0].get("_ts", 0)) < _TV_CACHE_TTL:
+    if _TV_CACHE and (now - _TV_CACHE_TS) < _TV_CACHE_TTL:
         return _TV_CACHE
 
     tickers = list(config.EGX_SYMBOL_MAP.keys())
@@ -92,17 +99,202 @@ def _tv_batch_fetch() -> dict[str, dict]:
                 "volume": vol or 0,
                 "change_pct": chg,
                 "previous_close": prev,
-                "_ts": now,
             }
 
         _TV_CACHE.clear()
         _TV_CACHE.update(result)
+        _TV_CACHE_TS = now
         logger.info("TradingView: fetched %d EGX stocks", len(result))
         return _TV_CACHE
 
     except Exception as e:
         logger.warning("TradingView batch fetch failed: %s", e)
         return _TV_CACHE
+
+
+def _validate_tv_overlay(
+    tv_data: dict,
+    yahoo_df: pd.DataFrame,
+    symbol: str,
+) -> bool:
+    """Validate TradingView overlay data before applying.
+
+    Checks:
+      - close is numeric and > 0
+      - open/high/low are numeric when present
+      - volume is numeric and >= 0
+      - high >= max(open, close, low) where fields are available
+      - low <= min(open, close, high) where fields are available
+      - reject material scale mismatch against valid historical close
+      - reject ORAS-style overlays when Yahoo history is flat/zero-volume
+        and scale differs abnormally
+
+    Returns True if valid, False if overlay should be skipped.
+    """
+    close = tv_data.get("close")
+    if close is None or not isinstance(close, (int, float)) or np.isnan(close) or close <= 0:
+        logger.warning("%s: TV overlay rejected — invalid close: %s", symbol, close)
+        return False
+
+    opn = tv_data.get("open")
+    high = tv_data.get("high")
+    low = tv_data.get("low")
+    volume = tv_data.get("volume")
+
+    if volume is not None and isinstance(volume, (int, float)):
+        if np.isnan(volume) or volume < 0:
+            logger.warning("%s: TV overlay rejected — invalid volume: %s", symbol, volume)
+            return False
+    else:
+        tv_data["volume"] = 0
+
+    for field_name, field_val in [("open", opn), ("high", high), ("low", low)]:
+        if field_val is not None and isinstance(field_val, (int, float)):
+            if np.isnan(field_val) or field_val <= 0:
+                logger.warning("%s: TV overlay rejected — invalid %s: %s", symbol, field_name, field_val)
+                return False
+        else:
+            tv_data[field_name] = close
+
+    high_val = tv_data.get("high", close)
+    low_val = tv_data.get("low", close)
+    opn_val = tv_data.get("open", close)
+    if high_val < max(opn_val, close, low_val):
+        logger.warning(
+            "%s: TV overlay rejected — high %.2f < max(open=%.2f, close=%.2f, low=%.2f)",
+            symbol, high_val, opn_val, close, low_val,
+        )
+        return False
+    if low_val > min(opn_val, close, high_val):
+        logger.warning(
+            "%s: TV overlay rejected — low %.2f > min(open=%.2f, close=%.2f, high=%.2f)",
+            symbol, low_val, opn_val, close, high_val,
+        )
+        return False
+
+    if len(yahoo_df) >= 5:
+        recent_closes = yahoo_df["Close"].iloc[-10:].dropna()
+        if len(recent_closes) >= 3:
+            avg_recent = float(recent_closes.mean())
+            if avg_recent > 0:
+                scale_ratio = close / avg_recent
+                if scale_ratio > 5.0 or scale_ratio < 0.2:
+                    logger.warning(
+                        "%s: TV overlay rejected — scale mismatch: TV close=%.2f, Yahoo avg=%.2f (ratio=%.2f)",
+                        symbol, close, avg_recent, scale_ratio,
+                    )
+                    return False
+
+    if len(yahoo_df) >= 5:
+        recent_vols = yahoo_df["Volume"].iloc[-10:].dropna()
+        if len(recent_vols) >= 3:
+            avg_vol = float(recent_vols.mean())
+            tv_vol = tv_data.get("volume", 0)
+            if avg_vol == 0 and tv_vol > 0 and close > 0:
+                recent_closes = yahoo_df["Close"].iloc[-10:].dropna()
+                if len(recent_closes) >= 3:
+                    avg_price = float(recent_closes.mean())
+                    tv_value = close * tv_vol
+                    avg_value = avg_price * avg_vol if avg_vol > 0 else 0
+                    if avg_value > 0 and tv_value / avg_value > 50:
+                        logger.warning(
+                            "%s: TV overlay rejected — ORAS pattern: zero Yahoo vol but TV value %.0f vs avg %.0f",
+                            symbol, tv_value, avg_value,
+                        )
+                        return False
+                    if avg_value == 0 and tv_vol > 1000:
+                        logger.warning(
+                            "%s: TV overlay rejected — ORAS pattern: zero Yahoo volume baseline but TV volume %d",
+                            symbol, tv_vol,
+                        )
+                        return False
+
+    return True
+
+
+def _apply_tradingview_overlay(
+    df: pd.DataFrame,
+    ticker: str,
+    tv_data: Optional[dict] = None,
+) -> pd.DataFrame:
+    """Apply TradingView live data overlay to a Yahoo historical DataFrame.
+
+    Returns a new DataFrame with the overlay applied (never mutates input).
+    If validation fails, returns the input unchanged with a warning.
+    """
+    result = df.copy(deep=True)
+
+    if result.empty:
+        return result
+
+    if tv_data is None:
+        tv = _tv_batch_fetch()
+        tv_data = tv.get(ticker)
+
+    if not tv_data or not tv_data.get("close"):
+        return result
+
+    if not _validate_tv_overlay(tv_data, result, ticker):
+        return result
+
+    today = datetime.now(_CAIRO_TZ).date()
+    last_bar_date = result.index[-1].date() if hasattr(result.index[-1], 'date') else None
+
+    if last_bar_date == today:
+        result.iloc[-1, result.columns.get_loc("Open")] = tv_data["open"]
+        result.iloc[-1, result.columns.get_loc("High")] = tv_data["high"]
+        result.iloc[-1, result.columns.get_loc("Low")] = tv_data["low"]
+        result.iloc[-1, result.columns.get_loc("Close")] = tv_data["close"]
+        result.iloc[-1, result.columns.get_loc("Volume")] = tv_data["volume"]
+        logger.debug("%s: updated last bar with TradingView data (close=%.2f)", ticker, tv_data["close"])
+    else:
+        new_row = pd.DataFrame(
+            {
+                "Open": [tv_data["open"]],
+                "High": [tv_data["high"]],
+                "Low": [tv_data["low"]],
+                "Close": [tv_data["close"]],
+                "Volume": [tv_data["volume"]],
+            },
+            index=pd.DatetimeIndex([pd.Timestamp(today, tz=_CAIRO_TZ)]),
+        )
+        result = pd.concat([result, new_row])
+        logger.debug("%s: appended TradingView bar (close=%.2f)", ticker, tv_data["close"])
+
+    return result
+
+
+def _get_cached_yahoo_history(ticker: str) -> tuple[pd.DataFrame, bool]:
+    """Fetch Yahoo historical data, using cache when available.
+
+    Returns (dataframe, was_cache_hit).
+    Only Yahoo data is cached. TradingView overlay is applied separately.
+    """
+    cache_key = f"{ticker}:{config.DATA_PERIOD}:{config.DATA_INTERVAL}"
+    now = time.time()
+    if cache_key in _CACHE:
+        data, ts = _CACHE[cache_key]
+        if now - ts < _CACHE_TTL:
+            return data, True
+
+    yahoo_sym = to_yahoo(ticker)
+    if not yahoo_sym:
+        raise ValueError(f"Unknown ticker: {ticker}")
+
+    def _fetch(period: str) -> pd.DataFrame:
+        return yf.Ticker(yahoo_sym).history(period=period, interval=config.DATA_INTERVAL)
+
+    data = _fetch(config.DATA_PERIOD)
+    if data.empty:
+        time.sleep(2)
+        data = _fetch("1y")
+    if data.empty:
+        data = _fetch("1y")
+    if data.empty:
+        raise ValueError(f"No data for {ticker} (provider: {yahoo_sym})")
+
+    _CACHE[cache_key] = (data, now)
+    return data, False
 
 
 def normalize_ticker(ticker: str) -> str:
@@ -129,58 +321,25 @@ def to_yahoo(ticker: str) -> Optional[str]:
 
 
 def fetch_history(ticker: str) -> pd.DataFrame:
-    cache_key = f"{ticker}:{config.DATA_PERIOD}:{config.DATA_INTERVAL}"
-    now = time.time()
-    if cache_key in _CACHE:
-        data, ts = _CACHE[cache_key]
-        if now - ts < _CACHE_TTL:
-            return data
+    """Fetch historical data with TradingView overlay during market hours.
 
-    yahoo_sym = to_yahoo(ticker)
-    if not yahoo_sym:
-        raise ValueError(f"Unknown ticker: {ticker}")
+    Architecture:
+      1. Get Yahoo historical data from cache or fresh fetch
+      2. Create a defensive deep copy
+      3. During MARKET_OPEN, apply TradingView overlay to the copy
+      4. Return the overlaid copy
 
-    def _fetch(period: str) -> pd.DataFrame:
-        return yf.Ticker(yahoo_sym).history(period=period, interval=config.DATA_INTERVAL)
+    The cached Yahoo DataFrame is never mutated.
+    Yahoo cache TTL: 300 seconds.
+    TradingView cache TTL: 60 seconds (applied on every call).
+    """
+    yahoo_df, _ = _get_cached_yahoo_history(ticker)
+    result = yahoo_df.copy(deep=True)
 
-    data = _fetch(config.DATA_PERIOD)
-    if data.empty:
-        time.sleep(2)
-        data = _fetch("1y")
-    if data.empty:
-        data = _fetch("1y")
-    if data.empty:
-        raise ValueError(f"No data for {ticker} (provider: {yahoo_sym})")
+    if _is_market_hours() and not result.empty:
+        result = _apply_tradingview_overlay(result, ticker)
 
-    if _is_market_hours() and not data.empty:
-        tv = _tv_batch_fetch()
-        tv_data = tv.get(ticker)
-        if tv_data and tv_data.get("close"):
-            today = datetime.now(_CAIRO_TZ).date()
-            last_bar_date = data.index[-1].date() if hasattr(data.index[-1], 'date') else None
-            if last_bar_date == today:
-                data.iloc[-1, data.columns.get_loc("Open")] = tv_data["open"]
-                data.iloc[-1, data.columns.get_loc("High")] = tv_data["high"]
-                data.iloc[-1, data.columns.get_loc("Low")] = tv_data["low"]
-                data.iloc[-1, data.columns.get_loc("Close")] = tv_data["close"]
-                data.iloc[-1, data.columns.get_loc("Volume")] = tv_data["volume"]
-                logger.debug("%s: updated last bar with TradingView data (close=%.2f)", ticker, tv_data["close"])
-            else:
-                new_row = pd.DataFrame(
-                    {
-                        "Open": [tv_data["open"]],
-                        "High": [tv_data["high"]],
-                        "Low": [tv_data["low"]],
-                        "Close": [tv_data["close"]],
-                        "Volume": [tv_data["volume"]],
-                    },
-                    index=pd.DatetimeIndex([pd.Timestamp(today, tz=_CAIRO_TZ)]),
-                )
-                data = pd.concat([data, new_row])
-                logger.debug("%s: appended TradingView bar (close=%.2f)", ticker, tv_data["close"])
-
-    _CACHE[cache_key] = (data, now)
-    return data
+    return result
 
 
 def fetch_live_quote(ticker: str) -> dict:
