@@ -274,6 +274,8 @@ async def handle_radar(ctx: MsgContext, top_n: int = 20) -> None:
     )
 
     try:
+        from scanner.data_provider import clear_cache
+        clear_cache()
         result = await asyncio.to_thread(run_market_radar, top_n=top_n)
 
         _last_radar["result"] = result

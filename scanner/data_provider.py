@@ -12,6 +12,12 @@ logging.getLogger("yfinance").disabled = True
 _CACHE: dict[str, tuple] = {}
 _CACHE_TTL = 300
 
+
+def clear_cache():
+    """Clear the data cache. Called before force-refresh scans."""
+    _CACHE.clear()
+    logger.info("Data cache cleared")
+
 logger = logging.getLogger(__name__)
 
 

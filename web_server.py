@@ -104,6 +104,13 @@ def _run_scan():
     return run_market_radar(top_n=50)
 
 
+def _run_scan_fresh():
+    from scanner.market_radar import run_market_radar
+    from scanner.data_provider import clear_cache
+    clear_cache()
+    return run_market_radar(top_n=50)
+
+
 def _save_history(result_dict):
     try:
         history = []
@@ -175,7 +182,7 @@ def api_radar():
 def api_radar_refresh():
     global _cached_result, _cached_timestamp
 
-    result = _run_scan()
+    result = _run_scan_fresh()
     result_dict = _result_to_dict(result)
     _save_history(result_dict)
 
