@@ -289,6 +289,11 @@ class TestWebServerAuth:
     @pytest.fixture
     def client(self):
         from web_server import app
+        import web_server as ws
+        with ws._lock:
+            ws._cached_result = None
+            ws._cached_timestamp = None
+            ws._scan_running = False
         app.config["TESTING"] = True
         with app.test_client() as client:
             yield client
@@ -314,27 +319,14 @@ class TestWebServerAuth:
 
     def test_get_endpoints_accessible_without_key(self, client):
         """GET /api/radar and GET /api/history are accessible without any key."""
-        with patch("web_server._run_scan_fresh") as mock_scan:
-            mock_result = MagicMock()
-            mock_result.all_items = []
-            mock_result.items = []
-            mock_result.timestamp = ""
-            mock_result.data_date = ""
-            mock_result.expected_latest_session = ""
-            mock_result.freshness_status = ""
-            mock_result.freshness_note = ""
-            mock_result.freshness_delay_days = 0
-            mock_result.stats.symbols_scanned = 0
-            mock_result.stats.activity_detected = 0
-            mock_result.stats.buying_count = 0
-            mock_result.stats.selling_count = 0
-            mock_result.stats.unusual_count = 0
-            mock_result.stats.failed_count = 0
-            mock_result.stats.skipped_illiquid = 0
-            mock_result.stats.scan_duration = 0.0
-            mock_scan.return_value = mock_result
-            resp = client.get("/api/radar")
-            assert resp.status_code == 200
+        import web_server as ws
+        with ws._lock:
+            ws._cached_result = None
+            ws._cached_timestamp = None
+        resp = client.get("/api/radar")
+        assert resp.status_code == 202
+        data = resp.get_json()
+        assert data["status"] == "initial_scan_in_progress"
         resp = client.get("/api/history")
         assert resp.status_code == 200
 
@@ -366,88 +358,41 @@ class TestWebServerAuth:
             assert "Invalid API key" in data["error"]
 
     def test_refresh_valid_key_accepted(self, client):
-        """POST /api/radar/refresh with valid key returns 200 (scan succeeds)."""
+        """POST /api/radar/refresh with valid key returns 202 (background scan triggered)."""
         with patch.dict(os.environ, {"ADMIN_API_KEY": "test-secret"}):
-            with patch("web_server._run_scan_fresh") as mock_scan:
-                mock_result = MagicMock()
-                mock_result.all_items = []
-                mock_result.items = []
-                mock_result.timestamp = ""
-                mock_result.data_date = ""
-                mock_result.expected_latest_session = ""
-                mock_result.freshness_status = ""
-                mock_result.freshness_note = ""
-                mock_result.freshness_delay_days = 0
-                mock_result.stats.symbols_scanned = 0
-                mock_result.stats.activity_detected = 0
-                mock_result.stats.buying_count = 0
-                mock_result.stats.selling_count = 0
-                mock_result.stats.unusual_count = 0
-                mock_result.stats.failed_count = 0
-                mock_result.stats.skipped_illiquid = 0
-                mock_result.stats.scan_duration = 0.0
-                mock_scan.return_value = mock_result
-                resp = client.post(
-                    "/api/radar/refresh",
-                    headers={"X-API-Key": "test-secret"},
-                )
-                assert resp.status_code == 200
+            resp = client.post(
+                "/api/radar/refresh",
+                headers={"X-API-Key": "test-secret"},
+            )
+            assert resp.status_code == 202
+            data = resp.get_json()
+            assert data["status"] == "scan triggered"
 
     def test_refresh_dev_bypass_allows_without_key(self, client):
         """POST /api/radar/refresh succeeds without key when dev bypass is on."""
+        from web_server import _rate_limiter
+        _rate_limiter._buckets.clear()
         with patch.dict(os.environ, {"ADMIN_API_KEY": "", "ALLOW_DEV_SERVER_FALLBACK": "true"}):
-            with patch("web_server._run_scan_fresh") as mock_scan:
-                mock_result = MagicMock()
-                mock_result.all_items = []
-                mock_result.items = []
-                mock_result.timestamp = ""
-                mock_result.data_date = ""
-                mock_result.expected_latest_session = ""
-                mock_result.freshness_status = ""
-                mock_result.freshness_note = ""
-                mock_result.freshness_delay_days = 0
-                mock_result.stats.symbols_scanned = 0
-                mock_result.stats.activity_detected = 0
-                mock_result.stats.buying_count = 0
-                mock_result.stats.selling_count = 0
-                mock_result.stats.unusual_count = 0
-                mock_result.stats.failed_count = 0
-                mock_result.stats.skipped_illiquid = 0
-                mock_result.stats.scan_duration = 0.0
-                mock_scan.return_value = mock_result
-                resp = client.post("/api/radar/refresh")
-                assert resp.status_code == 200
+            resp = client.post("/api/radar/refresh")
+            assert resp.status_code == 202
+            data = resp.get_json()
+            assert data["status"] == "scan triggered"
 
     def test_radar_rate_limit(self, client):
         """GET /api/radar respects rate limiting."""
+        import web_server
+        with web_server._lock:
+            web_server._cached_result = {"items": [], "stats": {}}
+            web_server._cached_timestamp = time.time()
         from web_server import _rate_limiter
         _rate_limiter._buckets.clear()
         with patch.dict(os.environ, {"RATE_LIMIT_API_RADAR_RPM": "2"}):
-            with patch("web_server._run_scan_fresh") as mock_scan:
-                mock_result = MagicMock()
-                mock_result.all_items = []
-                mock_result.items = []
-                mock_result.timestamp = ""
-                mock_result.data_date = ""
-                mock_result.expected_latest_session = ""
-                mock_result.freshness_status = ""
-                mock_result.freshness_note = ""
-                mock_result.freshness_delay_days = 0
-                mock_result.stats.symbols_scanned = 0
-                mock_result.stats.activity_detected = 0
-                mock_result.stats.buying_count = 0
-                mock_result.stats.selling_count = 0
-                mock_result.stats.unusual_count = 0
-                mock_result.stats.failed_count = 0
-                mock_result.stats.skipped_illiquid = 0
-                mock_result.stats.scan_duration = 0.0
-                mock_scan.return_value = mock_result
-                resp1 = client.get("/api/radar")
-                assert resp1.status_code == 200
-                resp2 = client.get("/api/radar")
-                assert resp2.status_code == 200
-                resp3 = client.get("/api/radar")
-                assert resp3.status_code == 429
+            resp1 = client.get("/api/radar")
+            assert resp1.status_code == 200
+            resp2 = client.get("/api/radar")
+            assert resp2.status_code == 200
+            resp3 = client.get("/api/radar")
+            assert resp3.status_code == 429
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -557,7 +502,22 @@ class TestConcurrentScanPrevention:
     def test_web_server_scan_flag_is_false_initially(self):
         """_scan_running is False when not scanning."""
         import web_server
+        with web_server._lock:
+            web_server._scan_running = False
         assert web_server._scan_running is False
+
+    def test_web_server_scan_lock_exists(self):
+        """web_server has a _scan_lock for preventing concurrent scans."""
+        import web_server
+        assert hasattr(web_server, "_scan_lock")
+        assert isinstance(web_server._scan_lock, type(threading.Lock()))
+
+    def test_web_server_scan_lock_not_held_initially(self):
+        """_scan_lock is not held at import time."""
+        import web_server
+        if web_server._scan_lock.locked():
+            web_server._scan_lock.release()
+        assert not web_server._scan_lock.locked()
 
     def test_bot_radar_lock_exists(self):
         """bot.py has an async lock for radar."""

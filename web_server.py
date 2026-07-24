@@ -1,8 +1,15 @@
 """
 EGX Lite Market Radar — Render Web Server
 Keeps the service alive, runs the Telegram bot, and serves the dashboard.
+
+Background scan architecture:
+  - Scans run in background threads, never blocking HTTP requests.
+  - /api/radar serves from cache only (202 when empty, 200 fresh/stale).
+  - /api/radar/refresh triggers background scan, returns 202 immediately.
+  - Periodic scheduler re-scans at configured interval.
 """
 
+import copy
 import os
 import sys
 import json
@@ -30,6 +37,7 @@ HISTORY_FILE = Path(__file__).parent / "data" / "scan_history.json"
 HISTORY_FILE.parent.mkdir(exist_ok=True)
 
 _lock = threading.Lock()
+_scan_lock = threading.Lock()
 _cached_result = None
 _cached_timestamp = None
 _CACHE_TTL = 300
@@ -164,6 +172,56 @@ def _save_history(result_dict):
         logger.warning("Failed to save history: %s", exc)
 
 
+# ─── Background Scan ─────────────────────────────────────────────────
+def _background_scan(label="periodic"):
+    """Run a full scan in the background thread.
+
+    Acquires _scan_lock non-blocking so only one scan runs at a time.
+    Updates cache and history only on success. Always releases the lock
+    and resets _scan_running in finally.
+    """
+    global _cached_result, _cached_timestamp, _scan_running
+
+    acquired = _scan_lock.acquire(blocking=False)
+    if not acquired:
+        logger.info("Scan already active, skipping (%s)", label)
+        return False
+
+    try:
+        with _lock:
+            _scan_running = True
+
+        result = _run_scan_fresh()
+        result_dict = _result_to_dict(result)
+        _save_history(result_dict)
+
+        with _lock:
+            _cached_result = copy.deepcopy(result_dict)
+            _cached_timestamp = time.time()
+
+        logger.info("Background scan completed (%s)", label)
+        return True
+    except Exception as e:
+        logger.error("Background scan failed (%s): %s", label, e)
+        return False
+    finally:
+        with _lock:
+            _scan_running = False
+        if acquired:
+            _scan_lock.release()
+
+
+def _periodic_scheduler():
+    """Run background scans on a configured interval. Never terminates."""
+    from scanner import config
+    while True:
+        try:
+            time.sleep(config.SCAN_INTERVAL_MINUTES * 60)
+            _background_scan("periodic")
+        except Exception as e:
+            logger.error("Scheduler error: %s", e)
+
+
 # ─── Dashboard Routes ───────────────────────────────────────────────
 @app.route("/")
 def home():
@@ -188,41 +246,38 @@ def dashboard_static(filename):
 # ─── API Routes ─────────────────────────────────────────────────────
 @app.route("/api/radar")
 def api_radar():
-    global _cached_result, _cached_timestamp, _scan_running
+    global _scan_running
 
     if not _rate_limiter.allow("api:radar", int(os.getenv("RATE_LIMIT_API_RADAR_RPM", "30"))):
         return jsonify({"error": "Rate limit exceeded"}), 429
 
     with _lock:
-        if _cached_result is not None and _cached_timestamp is not None:
-            age = time.time() - _cached_timestamp
-            if age < _CACHE_TTL:
-                return jsonify(_cached_result)
-        if _scan_running:
-            return jsonify({"error": "Scan already in progress"}), 409
-        _scan_running = True
+        cached = copy.deepcopy(_cached_result) if _cached_result is not None else None
+        cached_ts = _cached_timestamp
+        running = _scan_running
 
-    try:
-        result = _run_scan_fresh()
-        result_dict = _result_to_dict(result)
-        _save_history(result_dict)
+    if cached is None:
+        if not running:
+            threading.Thread(target=_background_scan, args=("api-trigger",), daemon=True).start()
+        return jsonify({"status": "initial_scan_in_progress", "scan_running": True}), 202
 
-        with _lock:
-            _cached_result = result_dict
-            _cached_timestamp = time.time()
-            _scan_running = False
+    age = time.time() - cached_ts if cached_ts else float("inf")
 
-        return jsonify(result_dict)
-    except Exception as e:
-        logger.error("Radar scan failed: %s", e)
-        with _lock:
-            _scan_running = False
-        return jsonify({"error": "Scan failed"}), 500
+    if age < _CACHE_TTL:
+        return jsonify(cached)
+
+    if not running:
+        threading.Thread(target=_background_scan, args=("api-trigger",), daemon=True).start()
+
+    cached["stale"] = True
+    cached["cache_timestamp"] = cached_ts
+    cached["scan_running"] = running
+    return jsonify(cached), 200
 
 
 @app.route("/api/radar/refresh", methods=["POST"])
 def api_radar_refresh():
-    global _cached_result, _cached_timestamp, _scan_running
+    global _scan_running
 
     admin_key = os.getenv("ADMIN_API_KEY", "")
     dev_bypass = os.getenv("ALLOW_DEV_SERVER_FALLBACK", "false").lower() == "true"
@@ -243,24 +298,9 @@ def api_radar_refresh():
     with _lock:
         if _scan_running:
             return jsonify({"error": "Scan already in progress"}), 409
-        _scan_running = True
 
-    try:
-        result = _run_scan_fresh()
-        result_dict = _result_to_dict(result)
-        _save_history(result_dict)
-
-        with _lock:
-            _cached_result = result_dict
-            _cached_timestamp = time.time()
-            _scan_running = False
-
-        return jsonify(result_dict)
-    except Exception as e:
-        logger.error("Radar refresh failed: %s", e)
-        with _lock:
-            _scan_running = False
-        return jsonify({"error": "Scan failed"}), 500
+    threading.Thread(target=_background_scan, args=("manual",), daemon=True).start()
+    return jsonify({"status": "scan triggered"}), 202
 
 
 @app.route("/api/history")
@@ -298,6 +338,15 @@ if __name__ == "__main__":
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("Flask server started in background")
+
+    initial_scan = threading.Thread(target=_background_scan, args=("startup",), daemon=True)
+    initial_scan.start()
+    logger.info("Initial background scan started")
+
+    scheduler = threading.Thread(target=_periodic_scheduler, daemon=True)
+    scheduler.start()
+    from scanner import config as _cfg
+    logger.info("Periodic scheduler started (interval: %d min)", _cfg.SCAN_INTERVAL_MINUTES)
 
     logger.info("Starting Telegram bot in main thread...")
     from bot import main as bot_main

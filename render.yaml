@@ -16,3 +16,7 @@ services:
         sync: false
       - key: EGXAPI_ENV
         value: paper
+      - key: SCAN_INTERVAL_MINUTES
+        value: "30"
+      - key: ALLOW_DEV_SERVER_FALLBACK
+        value: "false"

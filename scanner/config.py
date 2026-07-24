@@ -4,6 +4,7 @@ Every tunable parameter in one place.
 """
 
 import os
+import logging
 
 # ── Data Provider Mode ────────────────────────────────────────────────
 # fallback  → existing Yahoo Finance provider only
@@ -189,6 +190,20 @@ ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 # ── Server Fallback ──────────────────────────────────────────────────
 # When false (default), startup aborts if waitress is unavailable.
 ALLOW_DEV_SERVER_FALLBACK = os.getenv("ALLOW_DEV_SERVER_FALLBACK", "false").lower() == "true"
+
+# ── Background Scan Settings ────────────────────────────────────────
+_logger = logging.getLogger(__name__)
+try:
+    _scan_interval_raw = os.getenv("SCAN_INTERVAL_MINUTES", "30")
+    SCAN_INTERVAL_MINUTES = int(_scan_interval_raw)
+    if SCAN_INTERVAL_MINUTES <= 0:
+        raise ValueError
+except (ValueError, TypeError):
+    _logger.warning(
+        "Invalid SCAN_INTERVAL_MINUTES=%r, falling back to 30",
+        os.getenv("SCAN_INTERVAL_MINUTES", ""),
+    )
+    SCAN_INTERVAL_MINUTES = 30
 
 # ── Future Placeholders (NOT implemented v1.0) ────────────────────────
 # Telegram, Charts, Dashboard, Backtesting
