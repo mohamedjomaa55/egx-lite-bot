@@ -9,7 +9,7 @@ services:
       - key: BOT_TOKEN
         sync: false
       - key: PYTHON_VERSION
-        value: 3.11.0
+        value: 3.14
       - key: DATA_PROVIDER
         value: shadow
       - key: EGXAPI_KEY
