@@ -154,12 +154,14 @@ class TestFailedBackgroundScan:
 class TestGetRadar:
     def test_no_cache_returns_202(self, client):
         _set_cache(None, None)
-        resp = client.get("/api/radar")
+        with patch("web_server._background_scan"):
+            resp = client.get("/api/radar")
         assert resp.status_code == 202
 
     def test_no_cache_returns_initial_scan_in_progress(self, client):
         _set_cache(None, None)
-        resp = client.get("/api/radar")
+        with patch("web_server._background_scan"):
+            resp = client.get("/api/radar")
         data = resp.get_json()
         assert data["status"] == "initial_scan_in_progress"
 
@@ -189,12 +191,14 @@ class TestGetRadar:
 
     def test_stale_cache_returns_200(self, client):
         _set_cache({"items": [], "stats": {}}, time.time() - 600)
-        resp = client.get("/api/radar")
+        with patch("web_server._background_scan"):
+            resp = client.get("/api/radar")
         assert resp.status_code == 200
 
     def test_stale_cache_has_stale_true(self, client):
         _set_cache({"items": [], "stats": {}}, time.time() - 600)
-        resp = client.get("/api/radar")
+        with patch("web_server._background_scan"):
+            resp = client.get("/api/radar")
         data = resp.get_json()
         assert data["stale"] is True
 
@@ -215,7 +219,8 @@ class TestGetRadar:
 
     def test_stale_cache_preserves_original_items(self, client):
         _set_cache({"items": [{"symbol": "OLD"}], "stats": {}}, time.time() - 600)
-        resp = client.get("/api/radar")
+        with patch("web_server._background_scan"):
+            resp = client.get("/api/radar")
         result = resp.get_json()
         assert result["items"][0]["symbol"] == "OLD"
 
@@ -243,7 +248,8 @@ class TestPostRadarRefresh:
 
     def test_accepted_returns_202_immediately(self, client):
         with patch.dict(os.environ, {"ADMIN_API_KEY": "k"}):
-            resp = client.post("/api/radar/refresh", headers={"X-API-Key": "k"})
+            with patch("web_server._background_scan"):
+                resp = client.post("/api/radar/refresh", headers={"X-API-Key": "k"})
             assert resp.status_code == 202
 
     def test_does_not_block(self, client):
