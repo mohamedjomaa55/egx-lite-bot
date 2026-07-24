@@ -142,7 +142,7 @@ class MarketRadarResult:
 
 
 # ─── Per-Symbol Analysis ─────────────────────────────────────────────
-def _analyze_symbol(symbol: str) -> Optional[RadarItem]:
+def _analyze_symbol(symbol: str, min_avg_traded_value: float | None = None) -> Optional[RadarItem]:
     """
     Analyze a single symbol for radar metrics.
     Returns None if the symbol fails validation.
@@ -203,10 +203,11 @@ def _analyze_symbol(symbol: str) -> Optional[RadarItem]:
     # ── Liquidity filter ──────────────────────────────────────────────
     traded_values = closes * volumes
     avg_traded_value_20 = float(np.mean(traded_values[-20:]))
-    if avg_traded_value_20 < config.RADAR_MIN_AVG_TRADED_VALUE_20:
+    min_avg = min_avg_traded_value if min_avg_traded_value is not None else config.RADAR_MIN_AVG_TRADED_VALUE_20
+    if avg_traded_value_20 < min_avg:
         logger.debug(
             "Radar: %s skipped — avg traded value %.0f < %.0f",
-            symbol, avg_traded_value_20, config.RADAR_MIN_AVG_TRADED_VALUE_20,
+            symbol, avg_traded_value_20, min_avg,
         )
         return None
 
@@ -721,8 +722,7 @@ def run_market_radar(
     t0 = time.time()
     if top_n is None:
         top_n = config.RADAR_TOP_N
-    if min_avg_value is not None:
-        config.RADAR_MIN_AVG_TRADED_VALUE_20 = min_avg_value
+    min_avg = min_avg_value if min_avg_value is not None else config.RADAR_MIN_AVG_TRADED_VALUE_20
 
     if symbols is None:
         symbols = get_all_tickers()
@@ -735,7 +735,7 @@ def run_market_radar(
 
     # ── Parallel analysis ─────────────────────────────────────────────
     with ThreadPoolExecutor(max_workers=8) as executor:
-        future_to_sym = {executor.submit(_analyze_symbol, s): s for s in symbols}
+        future_to_sym = {executor.submit(_analyze_symbol, s, min_avg): s for s in symbols}
         for future in as_completed(future_to_sym):
             sym = future_to_sym[future]
             try:

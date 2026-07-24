@@ -177,6 +177,15 @@ FAILURE_STALE_DATA = "STALE_DATA"
 FAILURE_INVALID_VOLUME = "INVALID_VOLUME"
 FAILURE_PROVIDER_ERROR = "PROVIDER_ERROR"
 
+# ── Rate Limiting ─────────────────────────────────────────────────────
+RATE_LIMIT_TELEGRAM_RPM = int(os.getenv("RATE_LIMIT_TELEGRAM_RPM", "0"))  # 0 = unlimited
+RATE_LIMIT_API_RADAR_RPM = int(os.getenv("RATE_LIMIT_API_RADAR_RPM", "30"))
+RATE_LIMIT_API_HISTORY_RPM = int(os.getenv("RATE_LIMIT_API_HISTORY_RPM", "60"))
+RATE_LIMIT_API_REFRESH_RPM = int(os.getenv("RATE_LIMIT_API_REFRESH_RPM", "5"))
+
+# ── Admin API ────────────────────────────────────────────────────────
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+
 # ── Future Placeholders (NOT implemented v1.0) ────────────────────────
 # Telegram, Charts, Dashboard, Backtesting
 # Wyckoff, Fibonacci, Elliott, AI Ranking, Pattern Recognition

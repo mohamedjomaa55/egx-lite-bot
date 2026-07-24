@@ -18,7 +18,7 @@ if sys.platform == "win32":
     os.system("chcp 65001 >nul 2>&1")
 
 logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s %(message)s",
     level=logging.INFO,
     datefmt="%H:%M:%S",
 )
@@ -33,6 +33,32 @@ _lock = threading.Lock()
 _cached_result = None
 _cached_timestamp = None
 _CACHE_TTL = 300
+_scan_running = False
+
+
+class _RateLimiter:
+    """Simple token-bucket rate limiter per key."""
+
+    def __init__(self):
+        self._buckets: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str, rpm: int) -> bool:
+        if rpm <= 0:
+            return True
+        now = time.time()
+        window = 60.0
+        with self._lock:
+            timestamps = self._buckets.setdefault(key, [])
+            cutoff = now - window
+            self._buckets[key] = [t for t in timestamps if t > cutoff]
+            if len(self._buckets[key]) >= rpm:
+                return False
+            self._buckets[key].append(now)
+            return True
+
+
+_rate_limiter = _RateLimiter()
 
 
 def _result_to_dict(result):
@@ -162,42 +188,81 @@ def dashboard_static(filename):
 # ─── API Routes ─────────────────────────────────────────────────────
 @app.route("/api/radar")
 def api_radar():
-    global _cached_result, _cached_timestamp
+    global _cached_result, _cached_timestamp, _scan_running
+
+    if not _rate_limiter.allow("api:radar", int(os.getenv("RATE_LIMIT_API_RADAR_RPM", "30"))):
+        return jsonify({"error": "Rate limit exceeded"}), 429
 
     with _lock:
         if _cached_result is not None and _cached_timestamp is not None:
             age = time.time() - _cached_timestamp
             if age < _CACHE_TTL:
                 return jsonify(_cached_result)
+        if _scan_running:
+            return jsonify({"error": "Scan already in progress"}), 409
+        _scan_running = True
 
-    result = _run_scan_fresh()
-    result_dict = _result_to_dict(result)
-    _save_history(result_dict)
+    try:
+        result = _run_scan_fresh()
+        result_dict = _result_to_dict(result)
+        _save_history(result_dict)
 
-    with _lock:
-        _cached_result = result_dict
-        _cached_timestamp = time.time()
+        with _lock:
+            _cached_result = result_dict
+            _cached_timestamp = time.time()
+            _scan_running = False
 
-    return jsonify(result_dict)
+        return jsonify(result_dict)
+    except Exception as e:
+        logger.error("Radar scan failed: %s", e)
+        with _lock:
+            _scan_running = False
+        return jsonify({"error": "Scan failed"}), 500
 
 
 @app.route("/api/radar/refresh", methods=["POST"])
 def api_radar_refresh():
-    global _cached_result, _cached_timestamp
+    global _cached_result, _cached_timestamp, _scan_running
 
-    result = _run_scan_fresh()
-    result_dict = _result_to_dict(result)
-    _save_history(result_dict)
+    admin_key = os.getenv("ADMIN_API_KEY", "")
+    if admin_key:
+        provided = request.headers.get("X-API-Key", "")
+        if not provided:
+            return jsonify({"error": "Missing API key"}), 401
+        if provided != admin_key:
+            return jsonify({"error": "Invalid API key"}), 403
+
+    if not _rate_limiter.allow("api:refresh", int(os.getenv("RATE_LIMIT_API_REFRESH_RPM", "5"))):
+        return jsonify({"error": "Rate limit exceeded"}), 429
 
     with _lock:
-        _cached_result = result_dict
-        _cached_timestamp = time.time()
+        if _scan_running:
+            return jsonify({"error": "Scan already in progress"}), 409
+        _scan_running = True
 
-    return jsonify(result_dict)
+    try:
+        result = _run_scan_fresh()
+        result_dict = _result_to_dict(result)
+        _save_history(result_dict)
+
+        with _lock:
+            _cached_result = result_dict
+            _cached_timestamp = time.time()
+            _scan_running = False
+
+        return jsonify(result_dict)
+    except Exception as e:
+        logger.error("Radar refresh failed: %s", e)
+        with _lock:
+            _scan_running = False
+        return jsonify({"error": "Scan failed"}), 500
 
 
 @app.route("/api/history")
 def api_history():
+    if not _rate_limiter.allow("api:history", int(os.getenv("RATE_LIMIT_API_HISTORY_RPM", "60"))):
+        return jsonify({"error": "Rate limit exceeded"}), 429
+
     try:
         if HISTORY_FILE.exists():
             with open(HISTORY_FILE, "r", encoding="utf-8") as f:
@@ -211,7 +276,12 @@ def api_history():
 def run_flask():
     port = int(os.getenv("PORT", 5000))
     logger.info("Starting web server on port %d", port)
-    app.run(host="0.0.0.0", port=port, use_reloader=False)
+    try:
+        from waitress import serve
+        serve(app, host="0.0.0.0", port=port, threads=4)
+    except ImportError:
+        logger.warning("waitress not installed, falling back to Flask dev server")
+        app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 
 if __name__ == "__main__":

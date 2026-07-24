@@ -8,6 +8,7 @@ import os
 import sys
 import asyncio
 import logging
+import threading
 import pytz
 from datetime import datetime, time
 from pathlib import Path
@@ -38,6 +39,7 @@ from scanner.radar_output import (
     format_radar_symbol_telegram,
     format_radar_footer,
     format_radar_category_section,
+    format_radar_header,
     RADAR_FORMATTER_VERSION,
     _FRESHNESS_LABEL,
 )
@@ -59,7 +61,7 @@ LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s %(message)s",
     level=logging.INFO,
     datefmt="%H:%M:%S",
     handlers=[
@@ -68,6 +70,32 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+
+# ── Rate Limiter ─────────────────────────────────────────────────────
+class _RateLimiter:
+    """Simple token-bucket rate limiter per key."""
+
+    def __init__(self):
+        self._buckets: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str, rpm: int) -> bool:
+        if rpm <= 0:
+            return True
+        now = time.time()
+        window = 60.0
+        with self._lock:
+            timestamps = self._buckets.setdefault(key, [])
+            cutoff = now - window
+            self._buckets[key] = [t for t in timestamps if t > cutoff]
+            if len(self._buckets[key]) >= rpm:
+                return False
+            self._buckets[key].append(now)
+            return True
+
+
+_rate_limiter = _RateLimiter()
 
 
 # ── Context Wrapper ───────────────────────────────────────────────────
@@ -196,6 +224,10 @@ def _run_radar_sync(top_n: int = 20):
 # ── Radar Commands ────────────────────────────────────────────────────
 async def radar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /radar [N] — run market radar."""
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not _rate_limiter.allow(f"tg:{user_id}", config.RATE_LIMIT_TELEGRAM_RPM):
+        await update.message.reply_text("Rate limit reached. Please wait a moment.")
+        return
     ctx = MsgContext(update)
     top_n = 20
     if context.args:
@@ -276,7 +308,7 @@ async def radar_symbol_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
     except Exception as e:
         logger.error("Radar symbol failed: %s", e)
-        await update.message.reply_text(f"\u274c Error: {e}")
+        await update.message.reply_text("\u274c An error occurred. Please try again later.")
 
 
 async def send_to_ism_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -346,7 +378,7 @@ async def handle_radar(ctx: MsgContext, top_n: int = 20) -> None:
 
     except Exception as e:
         logger.error("Radar scan failed: %s", e)
-        await ctx.send(f"\u274c Radar scan failed: {e}", reply_markup=back_button())
+        await ctx.send("\u274c Radar scan failed. Please try again later.", reply_markup=back_button())
 
 
 async def handle_radar_category(ctx: MsgContext, category: str) -> None:
@@ -368,7 +400,7 @@ async def handle_radar_category(ctx: MsgContext, category: str) -> None:
                     result = _last_radar["result"]
         except Exception as e:
             logger.error("Radar scan failed: %s", e)
-            await ctx.send(f"\u274c Radar scan failed: {e}", reply_markup=back_button())
+            await ctx.send("\u274c Radar scan failed. Please try again later.", reply_markup=back_button())
             return
 
     if result is None:
@@ -554,7 +586,7 @@ async def egxapi_status_command(
 
     except Exception as e:
         logger.error("EGXAPI status failed: %s", e)
-        await update.message.reply_text(f"❌ Error: {e}")
+        await update.message.reply_text("\u274c An error occurred. Please try again later.")
 
 
 # ── Scan ──────────────────────────────────────────────────────────────
@@ -659,8 +691,8 @@ async def handle_scan(ctx: MsgContext) -> None:
         await ctx.send(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     except Exception as e:
-        logger.error(f"Scan failed: {e}")
-        await ctx.send(f"❌ فشل المسح: {e}", reply_markup=back_button())
+        logger.error("Scan failed: %s", e)
+        await ctx.send("\u274c Scan failed. Please try again later.", reply_markup=back_button())
 
 
 # ── Results ───────────────────────────────────────────────────────────

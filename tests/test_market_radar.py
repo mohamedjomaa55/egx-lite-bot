@@ -448,7 +448,7 @@ class TestTelegramOutput:
 class TestProviderFailure:
     def test_one_failure_doesnt_break_scan(self):
         """Test 9: One provider failure should not break the scan."""
-        def mock_analyze(symbol):
+        def mock_analyze(symbol, min_avg_traded_value=None):
             if symbol == "FAIL":
                 return None
             return _make_item(symbol=symbol)

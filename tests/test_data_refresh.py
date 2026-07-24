@@ -318,7 +318,7 @@ class TestTradingViewCache:
         dp._TV_CACHE_TS = time.time()
 
         result = _tv_batch_fetch()
-        assert result is dp._TV_CACHE
+        assert result == dp._TV_CACHE
 
     def test_cache_expires_after_tv_ttl(self):
         """Cache expires after _TV_CACHE_TTL seconds."""

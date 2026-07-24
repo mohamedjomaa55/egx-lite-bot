@@ -4,8 +4,8 @@ import numpy as np
 import httpx
 import pytz
 import time
-import copy
 import logging
+import threading
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -15,10 +15,12 @@ logging.getLogger("yfinance").disabled = True
 
 _CACHE: dict[str, tuple] = {}
 _CACHE_TTL = 300
+_CACHE_LOCK = threading.Lock()
 
 _TV_CACHE: dict[str, dict] = {}
 _TV_CACHE_TTL = 60
 _TV_CACHE_TS: float = 0.0
+_TV_CACHE_LOCK = threading.Lock()
 _TV_SCAN_URL = "https://scanner.tradingview.com/egypt/scan"
 _TV_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -32,9 +34,11 @@ logger = logging.getLogger(__name__)
 def clear_cache():
     """Clear all data caches (Yahoo + TradingView)."""
     global _TV_CACHE_TS
-    _CACHE.clear()
-    _TV_CACHE.clear()
-    _TV_CACHE_TS = 0.0
+    with _CACHE_LOCK:
+        _CACHE.clear()
+    with _TV_CACHE_LOCK:
+        _TV_CACHE.clear()
+        _TV_CACHE_TS = 0.0
     logger.info("All data caches cleared")
 
 
@@ -52,14 +56,16 @@ def _tv_batch_fetch() -> dict[str, dict]:
     """Fetch all EGX stocks from TradingView scanner in a single batch request.
 
     Uses a batch-level timestamp for cache validation instead of per-entry timestamps.
+    Returns a defensive copy of the cache — callers must not mutate the returned dict.
 
     Returns dict keyed by ticker symbol (e.g. 'EFIH') with values:
     {close, open, high, low, volume, change_pct, previous_close}
     """
     global _TV_CACHE_TS
     now = time.time()
-    if _TV_CACHE and (now - _TV_CACHE_TS) < _TV_CACHE_TTL:
-        return _TV_CACHE
+    with _TV_CACHE_LOCK:
+        if _TV_CACHE and (now - _TV_CACHE_TS) < _TV_CACHE_TTL:
+            return dict(_TV_CACHE)
 
     tickers = list(config.EGX_SYMBOL_MAP.keys())
     tv_symbols = [f"EGX:{t}" for t in tickers]
@@ -78,7 +84,8 @@ def _tv_batch_fetch() -> dict[str, dict]:
         resp = httpx.post(_TV_SCAN_URL, json=payload, headers=_TV_HEADERS, timeout=15)
         if resp.status_code != 200:
             logger.warning("TradingView scanner returned %d", resp.status_code)
-            return _TV_CACHE
+            with _TV_CACHE_LOCK:
+                return dict(_TV_CACHE)
 
         data = resp.json()
         result = {}
@@ -101,15 +108,17 @@ def _tv_batch_fetch() -> dict[str, dict]:
                 "previous_close": prev,
             }
 
-        _TV_CACHE.clear()
-        _TV_CACHE.update(result)
-        _TV_CACHE_TS = now
+        with _TV_CACHE_LOCK:
+            _TV_CACHE.clear()
+            _TV_CACHE.update(result)
+            _TV_CACHE_TS = now
         logger.info("TradingView: fetched %d EGX stocks", len(result))
-        return _TV_CACHE
+        return dict(result)
 
     except Exception as e:
         logger.warning("TradingView batch fetch failed: %s", e)
-        return _TV_CACHE
+        with _TV_CACHE_LOCK:
+            return dict(_TV_CACHE)
 
 
 def _validate_tv_overlay(
@@ -267,15 +276,16 @@ def _apply_tradingview_overlay(
 def _get_cached_yahoo_history(ticker: str) -> tuple[pd.DataFrame, bool]:
     """Fetch Yahoo historical data, using cache when available.
 
-    Returns (dataframe, was_cache_hit).
+    Returns (defensive_copy, was_cache_hit).
     Only Yahoo data is cached. TradingView overlay is applied separately.
     """
     cache_key = f"{ticker}:{config.DATA_PERIOD}:{config.DATA_INTERVAL}"
     now = time.time()
-    if cache_key in _CACHE:
-        data, ts = _CACHE[cache_key]
-        if now - ts < _CACHE_TTL:
-            return data, True
+    with _CACHE_LOCK:
+        if cache_key in _CACHE:
+            data, ts = _CACHE[cache_key]
+            if now - ts < _CACHE_TTL:
+                return data.copy(deep=True), True
 
     yahoo_sym = to_yahoo(ticker)
     if not yahoo_sym:
@@ -293,8 +303,9 @@ def _get_cached_yahoo_history(ticker: str) -> tuple[pd.DataFrame, bool]:
     if data.empty:
         raise ValueError(f"No data for {ticker} (provider: {yahoo_sym})")
 
-    _CACHE[cache_key] = (data, now)
-    return data, False
+    with _CACHE_LOCK:
+        _CACHE[cache_key] = (data.copy(deep=True), now)
+    return data.copy(deep=True), False
 
 
 def normalize_ticker(ticker: str) -> str:
@@ -369,11 +380,11 @@ def fetch_live_quote(ticker: str) -> dict:
             tv = _tv_batch_fetch()
             tv_data = tv.get(ticker)
             if tv_data and tv_data.get("close") and tv_data["close"] > 0:
-                result["last_traded_price"] = round(tv_data["close"], 2)
-                result["session_open"] = round(tv_data["open"], 2)
-                result["session_high"] = round(tv_data["high"], 2)
-                result["session_low"] = round(tv_data["low"], 2)
-                result["previous_close"] = round(tv_data["previous_close"], 2) if tv_data.get("previous_close") else None
+                result["last_traded_price"] = round(float(tv_data["close"]), 2)
+                result["session_open"] = round(float(tv_data["open"]), 2)
+                result["session_high"] = round(float(tv_data["high"]), 2)
+                result["session_low"] = round(float(tv_data["low"]), 2)
+                result["previous_close"] = round(float(tv_data["previous_close"]), 2) if tv_data.get("previous_close") else None
                 result["price_type"] = "LAST_TRADE"
                 result["source"] = "tradingview"
                 return result
@@ -410,20 +421,19 @@ def fetch_live_quote(ticker: str) -> dict:
             result["session_low"] = round(float(day_lo), 2)
 
     except Exception as e:
-        logger.debug(f"fast_info failed for {ticker}: {e}")
+        logger.debug("fast_info failed for %s: %s", ticker, e)
 
     # ── Sanity check: validate last_price against previous_close ────
     # Yahoo Finance often returns wrong lastPrice for EGX stocks
     # (e.g., 10.5 instead of 56.93). Reject if deviation > 30%.
-    if result["last_traded_price"] is not None and result["previous_close"] is not None:
+    if result["last_traded_price"] is not None and result["previous_close"] is not None and result["previous_close"] > 0:
         price = result["last_traded_price"]
         prev_close = result["previous_close"]
         deviation = abs(price - prev_close) / prev_close
         if deviation > 0.30:
             logger.debug(
-                f"Sanity check failed for {ticker}: "
-                f"last_price={price}, prev_close={prev_close}, "
-                f"deviation={deviation:.1%} > 30%. Rejecting."
+                "Sanity check failed for %s: last_price=%.2f, prev_close=%.2f, deviation=%.1f%% > 30%%. Rejecting.",
+                ticker, price, prev_close, deviation * 100,
             )
             result["last_traded_price"] = None
             result["source"] = "none"
@@ -454,18 +464,17 @@ def fetch_live_quote(ticker: str) -> dict:
                 result["session_low"] = round(float(rml), 2)
 
         except Exception as e:
-            logger.debug(f"info failed for {ticker}: {e}")
+            logger.debug("info failed for %s: %s", ticker, e)
 
     # ── Sanity check: validate info price against previous_close ────
-    if result["last_traded_price"] is not None and result["previous_close"] is not None:
+    if result["last_traded_price"] is not None and result["previous_close"] is not None and result["previous_close"] > 0:
         price = result["last_traded_price"]
         prev_close = result["previous_close"]
         deviation = abs(price - prev_close) / prev_close
         if deviation > 0.30:
             logger.debug(
-                f"Sanity check failed for {ticker} (info): "
-                f"price={price}, prev_close={prev_close}, "
-                f"deviation={deviation:.1%} > 30%. Rejecting."
+                "Sanity check failed for %s (info): price=%.2f, prev_close=%.2f, deviation=%.1f%% > 30%%. Rejecting.",
+                ticker, price, prev_close, deviation * 100,
             )
             result["last_traded_price"] = None
             result["source"] = "none"
@@ -490,7 +499,7 @@ def fetch_live_quote(ticker: str) -> dict:
                     result["previous_close"] = round(prev_val, 2)
 
         except Exception as e:
-            logger.debug(f"daily candle failed for {ticker}: {e}")
+            logger.debug("daily candle failed for %s: %s", ticker, e)
 
     # ── Source 4: Previous close fallback ────────────────────────────
     if result["last_traded_price"] is None:

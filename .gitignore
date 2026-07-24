@@ -1,6 +1,7 @@
 __pycache__/
 .env
 *.pyc
+*.log
 .vscode/
 output/
 logs/
@@ -12,3 +13,5 @@ backup/
 .mypy_cache/
 data/
 cache/
+bot_startup.log
+bot_startup_err.log
