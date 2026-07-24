@@ -215,10 +215,4 @@ def run_flask():
 
 
 if __name__ == "__main__":
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("Flask server started in background")
-
-    logger.info("Starting Telegram bot in main thread...")
-    from bot import main as bot_main
-    bot_main()
+    run_flask()
