@@ -186,6 +186,10 @@ RATE_LIMIT_API_REFRESH_RPM = int(os.getenv("RATE_LIMIT_API_REFRESH_RPM", "5"))
 # ── Admin API ────────────────────────────────────────────────────────
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
+# ── Server Fallback ──────────────────────────────────────────────────
+# When false (default), startup aborts if waitress is unavailable.
+ALLOW_DEV_SERVER_FALLBACK = os.getenv("ALLOW_DEV_SERVER_FALLBACK", "false").lower() == "true"
+
 # ── Future Placeholders (NOT implemented v1.0) ────────────────────────
 # Telegram, Charts, Dashboard, Backtesting
 # Wyckoff, Fibonacci, Elliott, AI Ranking, Pattern Recognition

@@ -225,7 +225,12 @@ def api_radar_refresh():
     global _cached_result, _cached_timestamp, _scan_running
 
     admin_key = os.getenv("ADMIN_API_KEY", "")
-    if admin_key:
+    dev_bypass = os.getenv("ALLOW_DEV_SERVER_FALLBACK", "false").lower() == "true"
+
+    if not admin_key:
+        if not dev_bypass:
+            return jsonify({"error": "Admin API key not configured"}), 503
+    else:
         provided = request.headers.get("X-API-Key", "")
         if not provided:
             return jsonify({"error": "Missing API key"}), 401
@@ -280,8 +285,13 @@ def run_flask():
         from waitress import serve
         serve(app, host="0.0.0.0", port=port, threads=4)
     except ImportError:
-        logger.warning("waitress not installed, falling back to Flask dev server")
-        app.run(host="0.0.0.0", port=port, use_reloader=False)
+        dev_bypass = os.getenv("ALLOW_DEV_SERVER_FALLBACK", "false").lower() == "true"
+        if dev_bypass:
+            logger.warning("waitress not installed — falling back to Flask dev server (ALLOW_DEV_SERVER_FALLBACK=true)")
+            app.run(host="0.0.0.0", port=port, use_reloader=False)
+        else:
+            logger.error("waitress not installed and ALLOW_DEV_SERVER_FALLBACK is not 'true' — aborting startup")
+            raise SystemExit("waitress is required in production. Install waitress or set ALLOW_DEV_SERVER_FALLBACK=true for development.")
 
 
 if __name__ == "__main__":

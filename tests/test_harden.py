@@ -1,6 +1,6 @@
 """
 Tests for Hardening — Security, Concurrency, Runtime Stability
-================================================================
+==============================================================
 
 Tests the security fixes (auth, rate limiting, .env exclusions),
 concurrency safety (locks, defensive copies, scan deduplication),
@@ -12,6 +12,7 @@ Usage
     python -m pytest tests/test_harden.py -v
 """
 
+import copy
 import os
 import sys
 import time
@@ -150,16 +151,45 @@ class TestCacheDefensiveCopies:
         assert result is not dp._TV_CACHE
 
     def test_tv_batch_fetch_copy_mutation_safe(self):
-        """Mutating the returned copy does not affect cache keys (shallow copy)."""
+        """Mutating the returned copy does not affect cache (deep copy)."""
         clear_cache()
         dp._TV_CACHE["Y"] = {"close": 200}
         dp._TV_CACHE_TS = time.time()
         result = _tv_batch_fetch()
-        # Shallow copy: adding/removing keys in result won't affect cache
+        # Adding/removing keys in result won't affect cache
         result["NEW_KEY"] = {"close": 500}
         assert "NEW_KEY" not in dp._TV_CACHE
         del result["Y"]
         assert "Y" in dp._TV_CACHE
+
+    def test_tv_batch_fetch_nested_mutation_safe(self):
+        """Mutating nested dicts in the returned copy does NOT affect cache."""
+        clear_cache()
+        dp._TV_CACHE["Z"] = {"close": 300, "open": 290, "volume": 1000}
+        dp._TV_CACHE_TS = time.time()
+        result = _tv_batch_fetch()
+        # Mutate nested dict — must not affect cache (deep copy)
+        result["Z"]["close"] = 999
+        result["Z"]["volume"] = 0
+        assert dp._TV_CACHE["Z"]["close"] == 300
+        assert dp._TV_CACHE["Z"]["volume"] == 1000
+
+    def test_tv_validate_overlay_mutation_safe(self):
+        """_validate_tv_overlay mutating tv_data dict does NOT corrupt cache."""
+        clear_cache()
+        dp._TV_CACHE["W"] = {"close": 150, "open": None, "high": None, "low": None, "volume": None}
+        dp._TV_CACHE_TS = time.time()
+        result = _tv_batch_fetch()
+        tv_data = result["W"]
+        import pandas as pd
+        fake_df = pd.DataFrame({"Close": [149.0, 150.0, 151.0], "Volume": [100, 200, 300]})
+        dp._validate_tv_overlay(tv_data, fake_df, "W")
+        # tv_data was mutated by _validate_tv_overlay (open/high/low set to close)
+        assert tv_data["open"] == 150
+        assert tv_data["high"] == 150
+        # Cache must be untouched
+        assert dp._TV_CACHE["W"]["open"] is None
+        assert dp._TV_CACHE["W"]["high"] is None
 
     def test_yahoo_cache_returns_copy(self):
         """_get_cached_yahoo_history returns a defensive copy."""
@@ -220,7 +250,7 @@ class TestConcurrentCacheAccess:
             try:
                 for _ in range(5):
                     with _TV_CACHE_LOCK:
-                        _ = dict(dp._TV_CACHE)
+                        _ = copy.deepcopy(dp._TV_CACHE)
             except Exception as e:
                 errors.append(e)
 
@@ -253,9 +283,9 @@ class TestGlobalConfigIsolation:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 6. WEB SERVER TESTS
+# 6. WEB SERVER AUTH TESTS
 # ══════════════════════════════════════════════════════════════════════
-class TestWebServer:
+class TestWebServerAuth:
     @pytest.fixture
     def client(self):
         from web_server import app
@@ -282,15 +312,49 @@ class TestWebServer:
         data = resp.get_json()
         assert isinstance(data, list)
 
-    def test_refresh_missing_api_key(self, client):
-        """POST /api/radar/refresh without key returns 401 when ADMIN_API_KEY is set."""
+    def test_get_endpoints_accessible_without_key(self, client):
+        """GET /api/radar and GET /api/history are accessible without any key."""
+        with patch("web_server._run_scan_fresh") as mock_scan:
+            mock_result = MagicMock()
+            mock_result.all_items = []
+            mock_result.items = []
+            mock_result.timestamp = ""
+            mock_result.data_date = ""
+            mock_result.expected_latest_session = ""
+            mock_result.freshness_status = ""
+            mock_result.freshness_note = ""
+            mock_result.freshness_delay_days = 0
+            mock_result.stats.symbols_scanned = 0
+            mock_result.stats.activity_detected = 0
+            mock_result.stats.buying_count = 0
+            mock_result.stats.selling_count = 0
+            mock_result.stats.unusual_count = 0
+            mock_result.stats.failed_count = 0
+            mock_result.stats.skipped_illiquid = 0
+            mock_result.stats.scan_duration = 0.0
+            mock_scan.return_value = mock_result
+            resp = client.get("/api/radar")
+            assert resp.status_code == 200
+        resp = client.get("/api/history")
+        assert resp.status_code == 200
+
+    def test_refresh_missing_admin_key_returns_503(self, client):
+        """POST /api/radar/refresh returns 503 when ADMIN_API_KEY is empty and no dev bypass."""
+        with patch.dict(os.environ, {"ADMIN_API_KEY": "", "ALLOW_DEV_SERVER_FALLBACK": "false"}):
+            resp = client.post("/api/radar/refresh")
+            assert resp.status_code == 503
+            data = resp.get_json()
+            assert "Admin API key not configured" in data["error"]
+
+    def test_refresh_missing_header_returns_401(self, client):
+        """POST /api/radar/refresh without X-API-Key header returns 401."""
         with patch.dict(os.environ, {"ADMIN_API_KEY": "test-secret"}):
             resp = client.post("/api/radar/refresh")
             assert resp.status_code == 401
             data = resp.get_json()
             assert "Missing API key" in data["error"]
 
-    def test_refresh_invalid_api_key(self, client):
+    def test_refresh_wrong_key_returns_403(self, client):
         """POST /api/radar/refresh with wrong key returns 403."""
         with patch.dict(os.environ, {"ADMIN_API_KEY": "test-secret"}):
             resp = client.post(
@@ -301,9 +365,37 @@ class TestWebServer:
             data = resp.get_json()
             assert "Invalid API key" in data["error"]
 
-    def test_refresh_no_admin_key_set_allows_all(self, client):
-        """POST /api/radar/refresh without ADMIN_API_KEY env allows all."""
-        with patch.dict(os.environ, {"ADMIN_API_KEY": ""}):
+    def test_refresh_valid_key_accepted(self, client):
+        """POST /api/radar/refresh with valid key returns 200 (scan succeeds)."""
+        with patch.dict(os.environ, {"ADMIN_API_KEY": "test-secret"}):
+            with patch("web_server._run_scan_fresh") as mock_scan:
+                mock_result = MagicMock()
+                mock_result.all_items = []
+                mock_result.items = []
+                mock_result.timestamp = ""
+                mock_result.data_date = ""
+                mock_result.expected_latest_session = ""
+                mock_result.freshness_status = ""
+                mock_result.freshness_note = ""
+                mock_result.freshness_delay_days = 0
+                mock_result.stats.symbols_scanned = 0
+                mock_result.stats.activity_detected = 0
+                mock_result.stats.buying_count = 0
+                mock_result.stats.selling_count = 0
+                mock_result.stats.unusual_count = 0
+                mock_result.stats.failed_count = 0
+                mock_result.stats.skipped_illiquid = 0
+                mock_result.stats.scan_duration = 0.0
+                mock_scan.return_value = mock_result
+                resp = client.post(
+                    "/api/radar/refresh",
+                    headers={"X-API-Key": "test-secret"},
+                )
+                assert resp.status_code == 200
+
+    def test_refresh_dev_bypass_allows_without_key(self, client):
+        """POST /api/radar/refresh succeeds without key when dev bypass is on."""
+        with patch.dict(os.environ, {"ADMIN_API_KEY": "", "ALLOW_DEV_SERVER_FALLBACK": "true"}):
             with patch("web_server._run_scan_fresh") as mock_scan:
                 mock_result = MagicMock()
                 mock_result.all_items = []
@@ -328,6 +420,8 @@ class TestWebServer:
 
     def test_radar_rate_limit(self, client):
         """GET /api/radar respects rate limiting."""
+        from web_server import _rate_limiter
+        _rate_limiter._buckets.clear()
         with patch.dict(os.environ, {"RATE_LIMIT_API_RADAR_RPM": "2"}):
             with patch("web_server._run_scan_fresh") as mock_scan:
                 mock_result = MagicMock()
@@ -378,14 +472,14 @@ class TestRuntimeStability:
         assert format_radar_header is not None
         assert _rate_limiter is not None
 
-    def test_exception_messages_not_leaked(self):
+    def test_exception_messages_not_leaked(self, client=None):
         """Error handlers send safe messages, not raw exceptions."""
         from web_server import app
         app.config["TESTING"] = True
-        with app.test_client() as client:
+        with app.test_client() as c:
             with patch("web_server._run_scan_fresh", side_effect=Exception("SECRET_DB_PASSWORD=xyz")):
                 with patch.dict(os.environ, {"ADMIN_API_KEY": ""}):
-                    resp = client.post("/api/radar/refresh")
+                    resp = c.post("/api/radar/refresh")
                     data = resp.get_json()
                     assert "SECRET_DB_PASSWORD" not in data.get("error", "")
 
@@ -399,6 +493,11 @@ class TestRuntimeStability:
         assert hasattr(config, "RATE_LIMIT_API_RADAR_RPM")
         assert hasattr(config, "RATE_LIMIT_API_HISTORY_RPM")
         assert hasattr(config, "RATE_LIMIT_API_REFRESH_RPM")
+
+    def test_allow_dev_server_fallback_configurable(self):
+        """ALLOW_DEV_SERVER_FALLBACK is defined in config."""
+        assert hasattr(config, "ALLOW_DEV_SERVER_FALLBACK")
+        assert isinstance(config.ALLOW_DEV_SERVER_FALLBACK, bool)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -430,12 +529,20 @@ class TestProductionServer:
         source = inspect.getsource(run_flask)
         assert "0.0.0.0" in source
 
-    def test_waitress_import_in_run_flask(self):
-        """run_flask tries to import waitress."""
+    def test_run_flask_fails_hard_without_waitress(self):
+        """run_flask raises SystemExit when waitress unavailable and no dev bypass."""
         from web_server import run_flask
         import inspect
         source = inspect.getsource(run_flask)
-        assert "waitress" in source
+        assert "ALLOW_DEV_SERVER_FALLBACK" in source
+        assert "SystemExit" in source
+
+    def test_run_flask_dev_bypass_check(self):
+        """run_flask checks ALLOW_DEV_SERVER_FALLBACK before falling back."""
+        from web_server import run_flask
+        import inspect
+        source = inspect.getsource(run_flask)
+        assert 'ALLOW_DEV_SERVER_FALLBACK' in source
 
 
 # ══════════════════════════════════════════════════════════════════════

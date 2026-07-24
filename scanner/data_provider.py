@@ -1,3 +1,4 @@
+import copy
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -56,7 +57,7 @@ def _tv_batch_fetch() -> dict[str, dict]:
     """Fetch all EGX stocks from TradingView scanner in a single batch request.
 
     Uses a batch-level timestamp for cache validation instead of per-entry timestamps.
-    Returns a defensive copy of the cache — callers must not mutate the returned dict.
+    Returns a deep copy of the cache — callers may freely mutate the returned dict.
 
     Returns dict keyed by ticker symbol (e.g. 'EFIH') with values:
     {close, open, high, low, volume, change_pct, previous_close}
@@ -65,7 +66,7 @@ def _tv_batch_fetch() -> dict[str, dict]:
     now = time.time()
     with _TV_CACHE_LOCK:
         if _TV_CACHE and (now - _TV_CACHE_TS) < _TV_CACHE_TTL:
-            return dict(_TV_CACHE)
+            return copy.deepcopy(_TV_CACHE)
 
     tickers = list(config.EGX_SYMBOL_MAP.keys())
     tv_symbols = [f"EGX:{t}" for t in tickers]
@@ -85,7 +86,7 @@ def _tv_batch_fetch() -> dict[str, dict]:
         if resp.status_code != 200:
             logger.warning("TradingView scanner returned %d", resp.status_code)
             with _TV_CACHE_LOCK:
-                return dict(_TV_CACHE)
+                return copy.deepcopy(_TV_CACHE)
 
         data = resp.json()
         result = {}
@@ -113,12 +114,12 @@ def _tv_batch_fetch() -> dict[str, dict]:
             _TV_CACHE.update(result)
             _TV_CACHE_TS = now
         logger.info("TradingView: fetched %d EGX stocks", len(result))
-        return dict(result)
+        return copy.deepcopy(result)
 
     except Exception as e:
         logger.warning("TradingView batch fetch failed: %s", e)
         with _TV_CACHE_LOCK:
-            return dict(_TV_CACHE)
+            return copy.deepcopy(_TV_CACHE)
 
 
 def _validate_tv_overlay(
